@@ -35,11 +35,6 @@ on:
       AWS_RELEASE_SECRET_ACCESS_KEY:
         required: true
 
-permissions:
-  id-token: write
-  contents: read
-  attestations: write
-
 jobs:
 
   set-image:

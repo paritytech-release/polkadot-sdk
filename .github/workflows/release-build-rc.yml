@@ -16,6 +16,11 @@ on:
         description: Tag matching the actual release candidate with the format stableYYMM-rcX or stableYYMM
         type: string
 
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+
 jobs:
   check-synchronization:
     uses: paritytech-release/sync-workflows/.github/workflows/check-syncronization.yml@main
