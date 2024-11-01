@@ -23,6 +23,19 @@ jobs:
           RUST_STABLE_VERSION=$(curl -sS https://raw.githubusercontent.com/paritytech/scripts/master/dockerfiles/ci-unified/Dockerfile | grep -oP 'ARG RUST_STABLE_VERSION=\K[^ ]+')
           echo "stable=$RUST_STABLE_VERSION" >> $GITHUB_OUTPUT
 
+  get-token:
+    runs-on: ubuntu-latest
+    outputs:
+      gh_token: ${{ steps.generate_write_token.outputs.token }}
+    steps:
+      - name: Generate content write token for the release automation
+        id: generate_write_token
+        uses: actions/create-github-app-token@v1
+        with:
+            app-id: ${{ vars.RELEASE_AUTOMATION_APP_ID }}
+            private-key: ${{ secrets.RELEASE_AUTOMATION_APP_PRIVATE_KEY }}
+            owner: paritytech-release
+
   build-runtimes:
     uses: "./.github/workflows/release-srtool.yml"
     with:
@@ -58,7 +71,7 @@ jobs:
 
   publish-release-draft:
     runs-on: ubuntu-latest
-    needs: [ get-rust-versions, build-runtimes ]
+    needs: [ get-rust-versions, build-runtimes, get-token ]
     outputs:
       release_url: ${{ steps.create-release.outputs.html_url }}
       asset_upload_url: ${{ steps.create-release.outputs.upload_url }}
@@ -114,19 +127,11 @@ jobs:
             scripts/release/context.json
             **/*-srtool-digest.json
 
-      - name: Generate content write token for the release automation
-        id: generate_write_token
-        uses: actions/create-github-app-token@v1
-        with:
-            app-id: ${{ vars.RELEASE_AUTOMATION_APP_ID }}
-            private-key: ${{ secrets.RELEASE_AUTOMATION_APP_PRIVATE_KEY }}
-            owner: paritytech-release
-
       - name: Create draft release
         id: create-release
         uses: actions/create-release@0cb9c9b65d5d1901c1f53e5e66eaf4afd303e70e # v1.1.4
         env:
-          GITHUB_TOKEN: ${{ steps.generate_write_token.outputs.token }}
+          GITHUB_TOKEN: ${{ needs.get-token.outputs.gh_token }}
         with:
           tag_name: ${{ env.REL_TAG }}
           release_name: Polkadot ${{ env.REL_TAG }}
@@ -134,9 +139,10 @@ jobs:
           draft: true
 
   publish-runtimes:
-    needs: [ build-runtimes, publish-release-draft ]
+    needs: [ build-runtimes, publish-release-draft, get-token ]
     continue-on-error: true
     runs-on: ubuntu-latest
+    environment: release
     strategy:
       matrix: ${{ fromJSON(needs.build-runtimes.outputs.published_runtimes) }}
 
@@ -158,7 +164,7 @@ jobs:
         if: ${{ matrix.chain  != 'rococo-parachain' }}
         uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 #v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ needs.get-token.outputs.gh_token }}
         with:
           upload_url: ${{ needs.publish-release-draft.outputs.asset_upload_url }}
           asset_path: ${{ env.ASSET }}
@@ -166,9 +172,10 @@ jobs:
           asset_content_type: application/wasm
 
   publish-binaries:
-    needs: [ publish-release-draft, build-binaries ]
+    needs: [ publish-release-draft, build-binaries, get-token ]
     continue-on-error: true
     runs-on: ubuntu-latest
+    environment: release
     strategy:
       matrix:
         binary: [frame-omni-bencher, chain-spec-builder, polkadot-omni-node]
@@ -182,7 +189,7 @@ jobs:
       - name: Upload ${{ matrix.binary }} binary
         uses: actions/upload-release-asset@e8f9f06c4b078e705bd2ea027f0926603fc9b4d5 #v1.0.2
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ needs.get-token.outputs.gh_token }}
         with:
           upload_url: ${{ needs.publish-release-draft.outputs.asset_upload_url }}
           asset_path:  ${{ github.workspace}}/${{ matrix.binary }}
