@@ -62,6 +62,8 @@ jobs:
     outputs:
       release_url: ${{ steps.create-release.outputs.html_url }}
       asset_upload_url: ${{ steps.create-release.outputs.upload_url }}
+    environment: release
+
     steps:
       - name: Checkout
         uses: actions/checkout@6d193bf28034eafb982f37bd894289fe649468fc # v4.0.0
