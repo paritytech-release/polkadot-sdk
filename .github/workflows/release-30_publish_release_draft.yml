@@ -112,11 +112,19 @@ jobs:
             scripts/release/context.json
             **/*-srtool-digest.json
 
+      - name: Generate content write token for the release automation
+        id: generate_write_token
+        uses: actions/create-github-app-token@v1
+        with:
+            app-id: ${{ vars.RELEASE_AUTOMATION_APP_ID }}
+            private-key: ${{ secrets.RELEASE_AUTOMATION_APP_PRIVATE_KEY }}
+            owner: paritytech-release
+
       - name: Create draft release
         id: create-release
         uses: actions/create-release@0cb9c9b65d5d1901c1f53e5e66eaf4afd303e70e # v1.1.4
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.generate_write_token.outputs.token }}
         with:
           tag_name: ${{ env.REL_TAG }}
           release_name: Polkadot ${{ env.REL_TAG }}
