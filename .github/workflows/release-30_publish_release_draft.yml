@@ -15,7 +15,6 @@ on:
 jobs:
   get-rust-versions:
     runs-on: ubuntu-latest
-    environment: release
     outputs:
       rustc-stable: ${{ steps.get-rust-versions.outputs.stable }}
     steps:
@@ -26,6 +25,7 @@ jobs:
 
   get-token:
     runs-on: ubuntu-latest
+    environment: release
     outputs:
       gh_token: ${{ steps.generate_write_token.outputs.token }}
     steps:
