@@ -633,12 +633,12 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
 								target: "sub-libp2p",
 								"Request {id:?} has no protocol registered.",
 							);
-							return Some(id.clone())
+							return Some((id.clone(), None))
 						};
 
 						let elapsed = req.started_at.elapsed();
 						if elapsed > *request_timeout {
-							Some(id.clone())
+							Some((id.clone(), Some(elapsed)))
 						} else {
 							None
 						}
@@ -652,7 +652,7 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
 					);
 				}
 
-				for id in timedout_requests {
+				for (id, _) in timedout_requests {
 					let Some(req) = self.pending_requests.remove(&id) else {
 						continue;
 					};
@@ -843,10 +843,10 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
 								None => {
 									log::warn!(
 										target: "sub-libp2p",
-										"Received `RequestResponseEvent::Message` with unexpected request id {:?}",
+										"Received `RequestResponseEvent::Message` with unexpected request id {:?} from {:?}",
 										request_id,
+										peer
 									);
-									debug_assert!(false);
 									continue
 								},
 							};
@@ -916,10 +916,11 @@ impl NetworkBehaviour for RequestResponsesBehaviour {
 								None => {
 									log::warn!(
 										target: "sub-libp2p",
-										"Received `RequestResponseEvent::Message` with unexpected request id {:?}",
+										"Received `RequestResponseEvent::OutboundFailure` with unexpected request id {:?} error {:?} from {:?}",
 										request_id,
+										error,
+										peer
 									);
-									debug_assert!(false);
 									continue
 								},
 							};
@@ -1153,7 +1154,7 @@ mod tests {
 
 	use crate::mock::MockPeerStore;
 	use assert_matches::assert_matches;
-	use futures::{channel::oneshot, executor::LocalPool, task::Spawn};
+	use futures::channel::oneshot;
 	use libp2p::{
 		core::{
 			transport::{MemoryTransport, Transport},
@@ -1166,10 +1167,10 @@ mod tests {
 	};
 	use std::{iter, time::Duration};
 
-	struct TokioExecutor(tokio::runtime::Runtime);
+	struct TokioExecutor;
 	impl Executor for TokioExecutor {
 		fn exec(&self, f: Pin<Box<dyn Future<Output = ()> + Send>>) {
-			let _ = self.0.spawn(f);
+			tokio::spawn(f);
 		}
 	}
 
@@ -1186,13 +1187,11 @@ mod tests {
 
 		let behaviour = RequestResponsesBehaviour::new(list, Arc::new(MockPeerStore {})).unwrap();
 
-		let runtime = tokio::runtime::Runtime::new().unwrap();
-
 		let mut swarm = Swarm::new(
 			transport,
 			behaviour,
 			keypair.public().to_peer_id(),
-			SwarmConfig::with_executor(TokioExecutor(runtime))
+			SwarmConfig::with_executor(TokioExecutor {})
 				// This is taken care of by notification protocols in non-test environment
 				// It is very slow in test environment for some reason, hence larger timeout
 				.with_idle_connection_timeout(Duration::from_secs(10)),
@@ -1205,34 +1204,27 @@ mod tests {
 		(swarm, listen_addr)
 	}
 
-	#[test]
-	fn basic_request_response_works() {
+	#[tokio::test]
+	async fn basic_request_response_works() {
 		let protocol_name = ProtocolName::from("/test/req-resp/1");
-		let mut pool = LocalPool::new();
 
 		// Build swarms whose behaviour is [`RequestResponsesBehaviour`].
 		let mut swarms = (0..2)
 			.map(|_| {
 				let (tx, mut rx) = async_channel::bounded::<IncomingRequest>(64);
 
-				pool.spawner()
-					.spawn_obj(
-						async move {
-							while let Some(rq) = rx.next().await {
-								let (fb_tx, fb_rx) = oneshot::channel();
-								assert_eq!(rq.payload, b"this is a request");
-								let _ = rq.pending_response.send(super::OutgoingResponse {
-									result: Ok(b"this is a response".to_vec()),
-									reputation_changes: Vec::new(),
-									sent_feedback: Some(fb_tx),
-								});
-								fb_rx.await.unwrap();
-							}
-						}
-						.boxed()
-						.into(),
-					)
-					.unwrap();
+				tokio::spawn(async move {
+					while let Some(rq) = rx.next().await {
+						let (fb_tx, fb_rx) = oneshot::channel();
+						assert_eq!(rq.payload, b"this is a request");
+						let _ = rq.pending_response.send(super::OutgoingResponse {
+							result: Ok(b"this is a response".to_vec()),
+							reputation_changes: Vec::new(),
+							sent_feedback: Some(fb_tx),
+						});
+						fb_rx.await.unwrap();
+					}
+				});
 
 				let protocol_config = ProtocolConfig {
 					name: protocol_name.clone(),
@@ -1256,84 +1248,69 @@ mod tests {
 
 		let (mut swarm, _) = swarms.remove(0);
 		// Running `swarm[0]` in the background.
-		pool.spawner()
-			.spawn_obj({
-				async move {
-					loop {
-						match swarm.select_next_some().await {
-							SwarmEvent::Behaviour(Event::InboundRequest { result, .. }) => {
-								result.unwrap();
-							},
-							_ => {},
-						}
-					}
-				}
-				.boxed()
-				.into()
-			})
-			.unwrap();
-
-		// Remove and run the remaining swarm.
-		let (mut swarm, _) = swarms.remove(0);
-		pool.run_until(async move {
-			let mut response_receiver = None;
-
+		tokio::spawn(async move {
 			loop {
 				match swarm.select_next_some().await {
-					SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-						let (sender, receiver) = oneshot::channel();
-						swarm.behaviour_mut().send_request(
-							&peer_id,
-							protocol_name.clone(),
-							b"this is a request".to_vec(),
-							None,
-							sender,
-							IfDisconnected::ImmediateError,
-						);
-						assert!(response_receiver.is_none());
-						response_receiver = Some(receiver);
-					},
-					SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					SwarmEvent::Behaviour(Event::InboundRequest { result, .. }) => {
 						result.unwrap();
-						break
 					},
 					_ => {},
 				}
 			}
-
-			assert_eq!(
-				response_receiver.unwrap().await.unwrap().unwrap(),
-				(b"this is a response".to_vec(), protocol_name)
-			);
 		});
+
+		// Remove and run the remaining swarm.
+		let (mut swarm, _) = swarms.remove(0);
+		let mut response_receiver = None;
+
+		loop {
+			match swarm.select_next_some().await {
+				SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+					let (sender, receiver) = oneshot::channel();
+					swarm.behaviour_mut().send_request(
+						&peer_id,
+						protocol_name.clone(),
+						b"this is a request".to_vec(),
+						None,
+						sender,
+						IfDisconnected::ImmediateError,
+					);
+					assert!(response_receiver.is_none());
+					response_receiver = Some(receiver);
+				},
+				SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					result.unwrap();
+					break
+				},
+				_ => {},
+			}
+		}
+
+		assert_eq!(
+			response_receiver.unwrap().await.unwrap().unwrap(),
+			(b"this is a response".to_vec(), protocol_name)
+		);
 	}
 
-	#[test]
-	fn max_response_size_exceeded() {
+	#[tokio::test]
+	async fn max_response_size_exceeded() {
 		let protocol_name = ProtocolName::from("/test/req-resp/1");
-		let mut pool = LocalPool::new();
 
 		// Build swarms whose behaviour is [`RequestResponsesBehaviour`].
 		let mut swarms = (0..2)
 			.map(|_| {
 				let (tx, mut rx) = async_channel::bounded::<IncomingRequest>(64);
 
-				pool.spawner()
-					.spawn_obj(
-						async move {
-							while let Some(rq) = rx.next().await {
-								assert_eq!(rq.payload, b"this is a request");
-								let _ = rq.pending_response.send(super::OutgoingResponse {
-									result: Ok(b"this response exceeds the limit".to_vec()),
-									reputation_changes: Vec::new(),
-									sent_feedback: None,
-								});
-							}
-						}
-						.boxed()
-						.into(),
-					)
-					.unwrap();
+				tokio::spawn(async move {
+					while let Some(rq) = rx.next().await {
+						assert_eq!(rq.payload, b"this is a request");
+						let _ = rq.pending_response.send(super::OutgoingResponse {
+							result: Ok(b"this response exceeds the limit".to_vec()),
+							reputation_changes: Vec::new(),
+							sent_feedback: None,
+						});
+					}
+				});
 
 				let protocol_config = ProtocolConfig {
 					name: protocol_name.clone(),
@@ -1358,59 +1335,52 @@ mod tests {
 		// Running `swarm[0]` in the background until a `InboundRequest` event happens,
 		// which is a hint about the test having ended.
 		let (mut swarm, _) = swarms.remove(0);
-		pool.spawner()
-			.spawn_obj({
-				async move {
-					loop {
-						match swarm.select_next_some().await {
-							SwarmEvent::Behaviour(Event::InboundRequest { result, .. }) => {
-								assert!(result.is_ok());
-							},
-							SwarmEvent::ConnectionClosed { .. } => {
-								break;
-							},
-							_ => {},
-						}
-					}
-				}
-				.boxed()
-				.into()
-			})
-			.unwrap();
-
-		// Remove and run the remaining swarm.
-		let (mut swarm, _) = swarms.remove(0);
-		pool.run_until(async move {
-			let mut response_receiver = None;
-
+		tokio::spawn(async move {
 			loop {
 				match swarm.select_next_some().await {
-					SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-						let (sender, receiver) = oneshot::channel();
-						swarm.behaviour_mut().send_request(
-							&peer_id,
-							protocol_name.clone(),
-							b"this is a request".to_vec(),
-							None,
-							sender,
-							IfDisconnected::ImmediateError,
-						);
-						assert!(response_receiver.is_none());
-						response_receiver = Some(receiver);
+					SwarmEvent::Behaviour(Event::InboundRequest { result, .. }) => {
+						assert!(result.is_ok());
 					},
-					SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
-						assert!(result.is_err());
-						break
+					SwarmEvent::ConnectionClosed { .. } => {
+						break;
 					},
 					_ => {},
 				}
 			}
-
-			match response_receiver.unwrap().await.unwrap().unwrap_err() {
-				RequestFailure::Network(OutboundFailure::Io(_)) => {},
-				request_failure => panic!("Unexpected failure: {request_failure:?}"),
-			}
 		});
+
+		// Remove and run the remaining swarm.
+		let (mut swarm, _) = swarms.remove(0);
+
+		let mut response_receiver = None;
+
+		loop {
+			match swarm.select_next_some().await {
+				SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+					let (sender, receiver) = oneshot::channel();
+					swarm.behaviour_mut().send_request(
+						&peer_id,
+						protocol_name.clone(),
+						b"this is a request".to_vec(),
+						None,
+						sender,
+						IfDisconnected::ImmediateError,
+					);
+					assert!(response_receiver.is_none());
+					response_receiver = Some(receiver);
+				},
+				SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					assert!(result.is_err());
+					break
+				},
+				_ => {},
+			}
+		}
+
+		match response_receiver.unwrap().await.unwrap().unwrap_err() {
+			RequestFailure::Network(OutboundFailure::Io(_)) => {},
+			request_failure => panic!("Unexpected failure: {request_failure:?}"),
+		}
 	}
 
 	/// A `RequestId` is a unique identifier among either all inbound or all outbound requests for
@@ -1423,11 +1393,10 @@ mod tests {
 	/// without a `RequestId` collision.
 	///
 	/// See [`ProtocolRequestId`] for additional information.
-	#[test]
-	fn request_id_collision() {
+	#[tokio::test]
+	async fn request_id_collision() {
 		let protocol_name_1 = ProtocolName::from("/test/req-resp-1/1");
 		let protocol_name_2 = ProtocolName::from("/test/req-resp-2/1");
-		let mut pool = LocalPool::new();
 
 		let mut swarm_1 = {
 			let protocol_configs = vec![
@@ -1485,114 +1454,100 @@ mod tests {
 		swarm_1.dial(listen_add_2).unwrap();
 
 		// Run swarm 2 in the background, receiving two requests.
-		pool.spawner()
-			.spawn_obj(
-				async move {
-					loop {
-						match swarm_2.select_next_some().await {
-							SwarmEvent::Behaviour(Event::InboundRequest { result, .. }) => {
-								result.unwrap();
-							},
-							_ => {},
-						}
-					}
+		tokio::spawn(async move {
+			loop {
+				match swarm_2.select_next_some().await {
+					SwarmEvent::Behaviour(Event::InboundRequest { result, .. }) => {
+						result.unwrap();
+					},
+					_ => {},
 				}
-				.boxed()
-				.into(),
-			)
-			.unwrap();
+			}
+		});
 
 		// Handle both requests sent by swarm 1 to swarm 2 in the background.
 		//
 		// Make sure both requests overlap, by answering the first only after receiving the
 		// second.
-		pool.spawner()
-			.spawn_obj(
-				async move {
-					let protocol_1_request = swarm_2_handler_1.next().await;
-					let protocol_2_request = swarm_2_handler_2.next().await;
+		tokio::spawn(async move {
+			let protocol_1_request = swarm_2_handler_1.next().await;
+			let protocol_2_request = swarm_2_handler_2.next().await;
 
-					protocol_1_request
-						.unwrap()
-						.pending_response
-						.send(OutgoingResponse {
-							result: Ok(b"this is a response".to_vec()),
-							reputation_changes: Vec::new(),
-							sent_feedback: None,
-						})
-						.unwrap();
-					protocol_2_request
-						.unwrap()
-						.pending_response
-						.send(OutgoingResponse {
-							result: Ok(b"this is a response".to_vec()),
-							reputation_changes: Vec::new(),
-							sent_feedback: None,
-						})
-						.unwrap();
-				}
-				.boxed()
-				.into(),
-			)
-			.unwrap();
+			protocol_1_request
+				.unwrap()
+				.pending_response
+				.send(OutgoingResponse {
+					result: Ok(b"this is a response".to_vec()),
+					reputation_changes: Vec::new(),
+					sent_feedback: None,
+				})
+				.unwrap();
+			protocol_2_request
+				.unwrap()
+				.pending_response
+				.send(OutgoingResponse {
+					result: Ok(b"this is a response".to_vec()),
+					reputation_changes: Vec::new(),
+					sent_feedback: None,
+				})
+				.unwrap();
+		});
 
 		// Have swarm 1 send two requests to swarm 2 and await responses.
-		pool.run_until(async move {
-			let mut response_receivers = None;
-			let mut num_responses = 0;
 
-			loop {
-				match swarm_1.select_next_some().await {
-					SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-						let (sender_1, receiver_1) = oneshot::channel();
-						let (sender_2, receiver_2) = oneshot::channel();
-						swarm_1.behaviour_mut().send_request(
-							&peer_id,
-							protocol_name_1.clone(),
-							b"this is a request".to_vec(),
-							None,
-							sender_1,
-							IfDisconnected::ImmediateError,
-						);
-						swarm_1.behaviour_mut().send_request(
-							&peer_id,
-							protocol_name_2.clone(),
-							b"this is a request".to_vec(),
-							None,
-							sender_2,
-							IfDisconnected::ImmediateError,
-						);
-						assert!(response_receivers.is_none());
-						response_receivers = Some((receiver_1, receiver_2));
-					},
-					SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
-						num_responses += 1;
-						result.unwrap();
-						if num_responses == 2 {
-							break
-						}
-					},
-					_ => {},
-				}
+		let mut response_receivers = None;
+		let mut num_responses = 0;
+
+		loop {
+			match swarm_1.select_next_some().await {
+				SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+					let (sender_1, receiver_1) = oneshot::channel();
+					let (sender_2, receiver_2) = oneshot::channel();
+					swarm_1.behaviour_mut().send_request(
+						&peer_id,
+						protocol_name_1.clone(),
+						b"this is a request".to_vec(),
+						None,
+						sender_1,
+						IfDisconnected::ImmediateError,
+					);
+					swarm_1.behaviour_mut().send_request(
+						&peer_id,
+						protocol_name_2.clone(),
+						b"this is a request".to_vec(),
+						None,
+						sender_2,
+						IfDisconnected::ImmediateError,
+					);
+					assert!(response_receivers.is_none());
+					response_receivers = Some((receiver_1, receiver_2));
+				},
+				SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					num_responses += 1;
+					result.unwrap();
+					if num_responses == 2 {
+						break
+					}
+				},
+				_ => {},
 			}
-			let (response_receiver_1, response_receiver_2) = response_receivers.unwrap();
-			assert_eq!(
-				response_receiver_1.await.unwrap().unwrap(),
-				(b"this is a response".to_vec(), protocol_name_1)
-			);
-			assert_eq!(
-				response_receiver_2.await.unwrap().unwrap(),
-				(b"this is a response".to_vec(), protocol_name_2)
-			);
-		});
+		}
+		let (response_receiver_1, response_receiver_2) = response_receivers.unwrap();
+		assert_eq!(
+			response_receiver_1.await.unwrap().unwrap(),
+			(b"this is a response".to_vec(), protocol_name_1)
+		);
+		assert_eq!(
+			response_receiver_2.await.unwrap().unwrap(),
+			(b"this is a response".to_vec(), protocol_name_2)
+		);
 	}
 
-	#[test]
-	fn request_fallback() {
+	#[tokio::test]
+	async fn request_fallback() {
 		let protocol_name_1 = ProtocolName::from("/test/req-resp/2");
 		let protocol_name_1_fallback = ProtocolName::from("/test/req-resp/1");
 		let protocol_name_2 = ProtocolName::from("/test/another");
-		let mut pool = LocalPool::new();
 
 		let protocol_config_1 = ProtocolConfig {
 			name: protocol_name_1.clone(),
@@ -1630,39 +1585,31 @@ mod tests {
 			let mut protocol_config_2 = protocol_config_2.clone();
 			protocol_config_2.inbound_queue = Some(tx_2);
 
-			pool.spawner()
-				.spawn_obj(
-					async move {
-						for _ in 0..2 {
-							if let Some(rq) = rx_1.next().await {
-								let (fb_tx, fb_rx) = oneshot::channel();
-								assert_eq!(rq.payload, b"request on protocol /test/req-resp/1");
-								let _ = rq.pending_response.send(super::OutgoingResponse {
-									result: Ok(
-										b"this is a response on protocol /test/req-resp/1".to_vec()
-									),
-									reputation_changes: Vec::new(),
-									sent_feedback: Some(fb_tx),
-								});
-								fb_rx.await.unwrap();
-							}
-						}
-
-						if let Some(rq) = rx_2.next().await {
-							let (fb_tx, fb_rx) = oneshot::channel();
-							assert_eq!(rq.payload, b"request on protocol /test/other");
-							let _ = rq.pending_response.send(super::OutgoingResponse {
-								result: Ok(b"this is a response on protocol /test/other".to_vec()),
-								reputation_changes: Vec::new(),
-								sent_feedback: Some(fb_tx),
-							});
-							fb_rx.await.unwrap();
-						}
+			tokio::spawn(async move {
+				for _ in 0..2 {
+					if let Some(rq) = rx_1.next().await {
+						let (fb_tx, fb_rx) = oneshot::channel();
+						assert_eq!(rq.payload, b"request on protocol /test/req-resp/1");
+						let _ = rq.pending_response.send(super::OutgoingResponse {
+							result: Ok(b"this is a response on protocol /test/req-resp/1".to_vec()),
+							reputation_changes: Vec::new(),
+							sent_feedback: Some(fb_tx),
+						});
+						fb_rx.await.unwrap();
 					}
-					.boxed()
-					.into(),
-				)
-				.unwrap();
+				}
+
+				if let Some(rq) = rx_2.next().await {
+					let (fb_tx, fb_rx) = oneshot::channel();
+					assert_eq!(rq.payload, b"request on protocol /test/other");
+					let _ = rq.pending_response.send(super::OutgoingResponse {
+						result: Ok(b"this is a response on protocol /test/other".to_vec()),
+						reputation_changes: Vec::new(),
+						sent_feedback: Some(fb_tx),
+					});
+					fb_rx.await.unwrap();
+				}
+			});
 
 			build_swarm(vec![protocol_config_1_fallback, protocol_config_2].into_iter())
 		};
@@ -1683,132 +1630,268 @@ mod tests {
 		}
 
 		// Running `older_swarm`` in the background.
-		pool.spawner()
-			.spawn_obj({
-				async move {
-					loop {
-						_ = older_swarm.0.select_next_some().await;
-					}
-				}
-				.boxed()
-				.into()
-			})
-			.unwrap();
+		tokio::spawn(async move {
+			loop {
+				_ = older_swarm.0.select_next_some().await;
+			}
+		});
 
 		// Run the newer swarm. Attempt to make requests on all protocols.
 		let (mut swarm, _) = new_swarm;
 		let mut older_peer_id = None;
 
-		pool.run_until(async move {
-			let mut response_receiver = None;
-			// Try the new protocol with a fallback.
+		let mut response_receiver = None;
+		// Try the new protocol with a fallback.
+		loop {
+			match swarm.select_next_some().await {
+				SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+					older_peer_id = Some(peer_id);
+					let (sender, receiver) = oneshot::channel();
+					swarm.behaviour_mut().send_request(
+						&peer_id,
+						protocol_name_1.clone(),
+						b"request on protocol /test/req-resp/2".to_vec(),
+						Some((
+							b"request on protocol /test/req-resp/1".to_vec(),
+							protocol_config_1_fallback.name.clone(),
+						)),
+						sender,
+						IfDisconnected::ImmediateError,
+					);
+					response_receiver = Some(receiver);
+				},
+				SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					result.unwrap();
+					break
+				},
+				_ => {},
+			}
+		}
+		assert_eq!(
+			response_receiver.unwrap().await.unwrap().unwrap(),
+			(
+				b"this is a response on protocol /test/req-resp/1".to_vec(),
+				protocol_name_1_fallback.clone()
+			)
+		);
+		// Try the old protocol with a useless fallback.
+		let (sender, response_receiver) = oneshot::channel();
+		swarm.behaviour_mut().send_request(
+			older_peer_id.as_ref().unwrap(),
+			protocol_name_1_fallback.clone(),
+			b"request on protocol /test/req-resp/1".to_vec(),
+			Some((
+				b"dummy request, will fail if processed".to_vec(),
+				protocol_config_1_fallback.name.clone(),
+			)),
+			sender,
+			IfDisconnected::ImmediateError,
+		);
+		loop {
+			match swarm.select_next_some().await {
+				SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					result.unwrap();
+					break
+				},
+				_ => {},
+			}
+		}
+		assert_eq!(
+			response_receiver.await.unwrap().unwrap(),
+			(
+				b"this is a response on protocol /test/req-resp/1".to_vec(),
+				protocol_name_1_fallback.clone()
+			)
+		);
+		// Try the new protocol with no fallback. Should fail.
+		let (sender, response_receiver) = oneshot::channel();
+		swarm.behaviour_mut().send_request(
+			older_peer_id.as_ref().unwrap(),
+			protocol_name_1.clone(),
+			b"request on protocol /test/req-resp-2".to_vec(),
+			None,
+			sender,
+			IfDisconnected::ImmediateError,
+		);
+		loop {
+			match swarm.select_next_some().await {
+				SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					assert_matches!(
+						result.unwrap_err(),
+						RequestFailure::Network(OutboundFailure::UnsupportedProtocols)
+					);
+					break
+				},
+				_ => {},
+			}
+		}
+		assert!(response_receiver.await.unwrap().is_err());
+		// Try the other protocol with no fallback.
+		let (sender, response_receiver) = oneshot::channel();
+		swarm.behaviour_mut().send_request(
+			older_peer_id.as_ref().unwrap(),
+			protocol_name_2.clone(),
+			b"request on protocol /test/other".to_vec(),
+			None,
+			sender,
+			IfDisconnected::ImmediateError,
+		);
+		loop {
+			match swarm.select_next_some().await {
+				SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					result.unwrap();
+					break
+				},
+				_ => {},
+			}
+		}
+		assert_eq!(
+			response_receiver.await.unwrap().unwrap(),
+			(b"this is a response on protocol /test/other".to_vec(), protocol_name_2.clone())
+		);
+	}
+
+	/// This test ensures the `RequestResponsesBehaviour` propagates back the Request::Timeout error
+	/// even if the libp2p component hangs.
+	///
+	/// For testing purposes, the communication happens on the `/test/req-resp/1` protocol.
+	///
+	/// This is achieved by:
+	/// - Two swarms are connected, the first one is slow to respond and has the timeout set to 60
+	///   seconds. The second swarm is configured with a timeout of 60 seconds in libp2p, however in
+	///   substrate this is set to 5 seconds.
+	///
+	/// - The first swarm introduces a delay of 10 seconds before responding to the request.
+	///
+	/// - The second swarm must enforce the 5 seconds timeout.
+	#[tokio::test]
+	async fn enforce_outbound_timeouts() {
+		const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+		const REQUEST_TIMEOUT_SHORT: Duration = Duration::from_secs(5);
+
+		// These swarms only speaks protocol_name.
+		let protocol_name = ProtocolName::from("/test/req-resp/1");
+
+		let protocol_config = ProtocolConfig {
+			name: protocol_name.clone(),
+			fallback_names: Vec::new(),
+			max_request_size: 1024,
+			max_response_size: 1024 * 1024,
+			request_timeout: REQUEST_TIMEOUT, // <-- important for the test
+			inbound_queue: None,
+		};
+
+		// Build swarms whose behaviour is [`RequestResponsesBehaviour`].
+		let (mut first_swarm, _) = {
+			let (tx, mut rx) = async_channel::bounded::<IncomingRequest>(64);
+
+			tokio::spawn(async move {
+				while let Some(rq) = rx.next().await {
+					assert_eq!(rq.payload, b"this is a request");
+
+					// Sleep for more than `REQUEST_TIMEOUT_SHORT` and less than
+					// `REQUEST_TIMEOUT`.
+					tokio::time::sleep(REQUEST_TIMEOUT_SHORT * 2).await;
+
+					// By the time the response is sent back, the second swarm
+					// received Timeout.
+					let _ = rq.pending_response.send(super::OutgoingResponse {
+						result: Ok(b"Second swarm already timedout".to_vec()),
+						reputation_changes: Vec::new(),
+						sent_feedback: None,
+					});
+				}
+			});
+
+			let mut protocol_config = protocol_config.clone();
+			protocol_config.inbound_queue = Some(tx);
+
+			build_swarm(iter::once(protocol_config))
+		};
+
+		let (mut second_swarm, second_address) = {
+			let (tx, mut rx) = async_channel::bounded::<IncomingRequest>(64);
+
+			tokio::spawn(async move {
+				while let Some(rq) = rx.next().await {
+					let _ = rq.pending_response.send(super::OutgoingResponse {
+						result: Ok(b"This is the response".to_vec()),
+						reputation_changes: Vec::new(),
+						sent_feedback: None,
+					});
+				}
+			});
+			let mut protocol_config = protocol_config.clone();
+			protocol_config.inbound_queue = Some(tx);
+
+			build_swarm(iter::once(protocol_config.clone()))
+		};
+		// Modify the second swarm to have a shorter timeout.
+		second_swarm
+			.behaviour_mut()
+			.protocols
+			.get_mut(&protocol_name)
+			.unwrap()
+			.request_timeout = REQUEST_TIMEOUT_SHORT;
+
+		// Ask first swarm to dial the second swarm.
+		{
+			Swarm::dial(&mut first_swarm, second_address).unwrap();
+		}
+
+		// Running the first swarm in the background until a `InboundRequest` event happens,
+		// which is a hint about the test having ended.
+		tokio::spawn(async move {
 			loop {
-				match swarm.select_next_some().await {
-					SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-						older_peer_id = Some(peer_id);
-						let (sender, receiver) = oneshot::channel();
-						swarm.behaviour_mut().send_request(
-							&peer_id,
-							protocol_name_1.clone(),
-							b"request on protocol /test/req-resp/2".to_vec(),
-							Some((
-								b"request on protocol /test/req-resp/1".to_vec(),
-								protocol_config_1_fallback.name.clone(),
-							)),
-							sender,
-							IfDisconnected::ImmediateError,
-						);
-						response_receiver = Some(receiver);
+				let event = first_swarm.select_next_some().await;
+				match event {
+					SwarmEvent::Behaviour(Event::InboundRequest { result, .. }) => {
+						assert!(result.is_ok());
 					},
-					SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
-						result.unwrap();
-						break
+					SwarmEvent::ConnectionClosed { .. } => {
+						break;
 					},
 					_ => {},
 				}
 			}
-			assert_eq!(
-				response_receiver.unwrap().await.unwrap().unwrap(),
-				(
-					b"this is a response on protocol /test/req-resp/1".to_vec(),
-					protocol_name_1_fallback.clone()
-				)
-			);
-			// Try the old protocol with a useless fallback.
-			let (sender, response_receiver) = oneshot::channel();
-			swarm.behaviour_mut().send_request(
-				older_peer_id.as_ref().unwrap(),
-				protocol_name_1_fallback.clone(),
-				b"request on protocol /test/req-resp/1".to_vec(),
-				Some((
-					b"dummy request, will fail if processed".to_vec(),
-					protocol_config_1_fallback.name.clone(),
-				)),
-				sender,
-				IfDisconnected::ImmediateError,
-			);
-			loop {
-				match swarm.select_next_some().await {
-					SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
-						result.unwrap();
-						break
-					},
-					_ => {},
-				}
-			}
-			assert_eq!(
-				response_receiver.await.unwrap().unwrap(),
-				(
-					b"this is a response on protocol /test/req-resp/1".to_vec(),
-					protocol_name_1_fallback.clone()
-				)
-			);
-			// Try the new protocol with no fallback. Should fail.
-			let (sender, response_receiver) = oneshot::channel();
-			swarm.behaviour_mut().send_request(
-				older_peer_id.as_ref().unwrap(),
-				protocol_name_1.clone(),
-				b"request on protocol /test/req-resp-2".to_vec(),
-				None,
-				sender,
-				IfDisconnected::ImmediateError,
-			);
-			loop {
-				match swarm.select_next_some().await {
-					SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
-						assert_matches!(
-							result.unwrap_err(),
-							RequestFailure::Network(OutboundFailure::UnsupportedProtocols)
-						);
-						break
-					},
-					_ => {},
-				}
-			}
-			assert!(response_receiver.await.unwrap().is_err());
-			// Try the other protocol with no fallback.
-			let (sender, response_receiver) = oneshot::channel();
-			swarm.behaviour_mut().send_request(
-				older_peer_id.as_ref().unwrap(),
-				protocol_name_2.clone(),
-				b"request on protocol /test/other".to_vec(),
-				None,
-				sender,
-				IfDisconnected::ImmediateError,
-			);
-			loop {
-				match swarm.select_next_some().await {
-					SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
-						result.unwrap();
-						break
-					},
-					_ => {},
-				}
-			}
-			assert_eq!(
-				response_receiver.await.unwrap().unwrap(),
-				(b"this is a response on protocol /test/other".to_vec(), protocol_name_2.clone())
-			);
 		});
+
+		// Run the second swarm.
+		// - on connection established send the request to the first swarm
+		// - expect to receive a timeout
+		let mut response_receiver = None;
+		loop {
+			let event = second_swarm.select_next_some().await;
+
+			match event {
+				SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+					let (sender, receiver) = oneshot::channel();
+					second_swarm.behaviour_mut().send_request(
+						&peer_id,
+						protocol_name.clone(),
+						b"this is a request".to_vec(),
+						None,
+						sender,
+						IfDisconnected::ImmediateError,
+					);
+					assert!(response_receiver.is_none());
+					response_receiver = Some(receiver);
+				},
+				SwarmEvent::ConnectionClosed { .. } => {
+					break;
+				},
+				SwarmEvent::Behaviour(Event::RequestFinished { result, .. }) => {
+					assert!(result.is_err());
+					break
+				},
+				_ => {},
+			}
+		}
+
+		// Expect the timeout.
+		match response_receiver.unwrap().await.unwrap().unwrap_err() {
+			RequestFailure::Network(OutboundFailure::Timeout) => {},
+			request_failure => panic!("Unexpected failure: {request_failure:?}"),
+		}
 	}
 }
