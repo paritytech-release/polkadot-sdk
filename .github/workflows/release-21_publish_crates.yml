@@ -1,0 +1,36 @@
+name: Release - Publish crates to crates.io
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version to publish crates for'
+        required: true
+        default: 'stable2412'
+
+jobs:
+  prepare-tooling:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@f0deed1e0edfc6a9be95417288c0e1099b1eeec3 # v2.7.7
+        with:
+          cache-on-failure: true
+
+      - name: install parity-publish
+        run: |
+          # rustup override set 1.82.0
+          cargo install parity-publish@0.10.4 --locked -q
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: prepare-tooling
+    steps:
+      - name: Checkout
+        uses: actions/checkout@6d193bf28034eafb982f37bd894289fe649468fc # v4.1.7
+
+      - name: parity-publish update plan
+        run: parity-publish --color always plan --skip-check --prdoc prdoc/
+
+      - name: parity-publish apply plan
+        run: parity-publish --color always apply
