@@ -137,6 +137,7 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           # Add the new deb to the repo
+          echo "AWS default region $AWS_DEFAULT_REGION"
           reprepro -b "$LOCAL_DEB_REPO_PATH" includedeb "${{ inputs.distribution }}" "release-artifacts/polkadot_${NODE_VERSION}_amd64.deb"
 
       - name: Upload updated deb repo
