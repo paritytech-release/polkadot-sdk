@@ -238,4 +238,3 @@ jobs:
           fi
           # Invalidate CloudFront cache to serve latest files
           aws cloudfront create-invalidation --distribution-id ${{ inputs.cloudfront_distribution_id }} --paths '/${{ inputs.package_type }}/*'
-          
