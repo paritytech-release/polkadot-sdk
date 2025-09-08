@@ -291,7 +291,7 @@ jobs:
     - name: Generate artifact attestation
       uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
       with:
-        subject-path: release-artifacts/polkadot/*.{deb,rpm}
+        subject-path: target/production/*.{deb,rpm}
 
     - name: Upload ${{inputs.package }} artifacts
       uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
