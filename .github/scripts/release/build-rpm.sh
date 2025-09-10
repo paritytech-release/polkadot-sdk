@@ -11,9 +11,24 @@ echo "Building an RPM package for '$PRODUCT' in '$PROFILE' profile"
 
 # Building a release package.
 # The `--release` flag is not supported by cargo-rpm 0.8.0.
-cargo rpm build -p $PRODUCT
+cargo rpm build --no-cargo-build
 
-rpm_file=target/x86_64/rpmbuild/RPMS/x86_64/$PRODUCT-*-1.x86_64.rpm
+echo "Listing target dir:"
+ls -l target/
+
+echo "Listing release dir:"
+ls -l target/release/
+
+echo "Listing rpmbuild dir:"
+ls -l target/release/rpmbuild/
+
+echo "Listing RPMs dir:"
+ls -l target/release/rpmbuild/RPMs/
+
+echo "Listing x86 dir:"
+ls -l target/release/rpmbuild/RPMs/x86_64/
+
+rpm_file=target/release/rpmbuild/RPMs/x86_64/$PRODUCT-*-1.x86_64.rpm
 
 # Check if the file exists before attempting to copy.
 if [ ! -f "$rpm_file" ]; then
