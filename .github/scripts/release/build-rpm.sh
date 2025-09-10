@@ -7,12 +7,12 @@ PROFILE=${PROFILE:-production}
 
 # Install cargo-rpm. A specific version can be used if needed.
 cargo install cargo-rpm --locked -q
-echo "Using cargo-rpm v$(cargo rpm --version)"
+echo "Using cargo-rpm v$(cargo-rpm --version)"
 echo "Building an RPM package for '$PRODUCT' in '$PROFILE' profile"
 
-
-cargo rpm build --release -p $PRODUCT
-
+# Building a release package.
+# The `--release` flag is not supported by cargo-rpm 0.8.0.
+cargo rpm build -p $PRODUCT
 
 rpm_file=target/x86_64/rpmbuild/RPMS/x86_64/$PRODUCT-*-1.x86_64.rpm
 
