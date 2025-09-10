@@ -7,7 +7,6 @@ PROFILE=${PROFILE:-production}
 
 # Install cargo-rpm. A specific version can be used if needed.
 cargo install cargo-rpm --locked -q
-echo "Using cargo-rpm v$(cargo-rpm --version)"
 echo "Building an RPM package for '$PRODUCT' in '$PROFILE' profile"
 
 # Building a release package.
