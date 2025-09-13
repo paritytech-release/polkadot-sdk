@@ -9,23 +9,13 @@ PROFILE=${PROFILE:-production}
 cargo install cargo-rpm --locked -q
 echo "Building an RPM package for '$PRODUCT' in '$PROFILE' profile"
 
-echo "Listing current directory before cargo rpm:"
-ls -l
-echo "---"
-
 # Building a release package.
 # The `--release` flag is not supported by cargo-rpm 0.8.0.
 cargo rpm build --no-cargo-build
 
-echo "Listing target directory after cargo rpm:"
-ls -l target/
-echo "---"
-
-echo "Listing rpmbuild directory after cargo rpm:"
-ls -l target/release/rpmbuild/
-echo "---"
-
-rpm_file=target/release/rpmbuild/RPMs/x86_64/$PRODUCT-*-1.x86_64.rpm
+# The binary is placed in the workspace root's target directory.
+# The `rpm_file` path needs to be adjusted to find it.
+rpm_file=../target/release/rpmbuild/RPMs/x86_64/$PRODUCT-*-1.x86_64.rpm
 
 # Check if the file exists before attempting to copy.
 if [ ! -f "$rpm_file" ]; then
@@ -33,8 +23,8 @@ if [ ! -f "$rpm_file" ]; then
     exit 1
 fi
 
-# The artifacts are copied to a designated `target/production` directory.
-mkdir -p target/production
-cp $rpm_file target/production/
+# The artifacts are copied to a designated `target/production` directory at the project root.
+mkdir -p ../target/production
+cp $rpm_file ../target/production/
 
 echo "RPM package build complete. Artifact copied to target/production/."

@@ -8,8 +8,8 @@ authors.workspace = true
 edition.workspace = true
 version = "6.0.0"
 default-run = "polkadot"
-homepage.workspace = true
-repository.workspace = true
+homepage = "https://paritytech.github.io/polkadot-sdk/"
+repository = "https://github.com/paritytech/polkadot-sdk.git"
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -46,6 +46,21 @@ assets = [
 	],
 ]
 conf-files = ["/etc/default/polkadot"]
+
+[package.metadata.rpm]
+package = "polkadot"
+summary = "Polkadot client based on the Substrate framework."
+description = "Implementation of a Polkadot node in Rust based on the Substrate framework."
+license = "GPL-3.0-only"
+
+[package.metadata.rpm.targets]
+polkadot = { path = "path/to/polkadot" }
+polkadot-prepare-worker = { path = "path/to/polkadot-prepare-worker" }
+polkadot-execute-worker = { path = "path/to/polkadot-execute-worker" }
+
+[package.metadata.rpm.assets]
+"scripts/packaging/polkadot.service" = { dest = "/usr/lib/systemd/system/polkadot.service", mode = "644" }
+
 
 [package.metadata.spellcheck]
 config = "./scripts/ci/gitlab/spellcheck.toml"
