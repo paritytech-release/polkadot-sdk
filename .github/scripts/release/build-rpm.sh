@@ -9,9 +9,21 @@ PROFILE=${PROFILE:-production}
 cargo install cargo-rpm --locked -q
 echo "Building an RPM package for '$PRODUCT' in '$PROFILE' profile"
 
+echo "Listing current directory before cargo rpm:"
+ls -l
+echo "---"
+
 # Building a release package.
 # The `--release` flag is not supported by cargo-rpm 0.8.0.
 cargo rpm build --no-cargo-build
+
+echo "Listing target directory after cargo rpm:"
+ls -l target/
+echo "---"
+
+echo "Listing rpmbuild directory after cargo rpm:"
+ls -l target/release/rpmbuild/
+echo "---"
 
 rpm_file=target/release/rpmbuild/RPMs/x86_64/$PRODUCT-*-1.x86_64.rpm
 

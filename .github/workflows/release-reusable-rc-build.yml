@@ -302,7 +302,7 @@ jobs:
 
     - name: Build polkadot rpm package
       shell: bash
-      working-directory: ./bin/node/cli
+      working-directory: ./polkadot
       run: |
         . "${GITHUB_WORKSPACE}"/.github/scripts/common/lib.sh
         VERSION=$(get_polkadot_node_version_from_code)
