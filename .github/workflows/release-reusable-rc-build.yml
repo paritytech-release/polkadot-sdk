@@ -300,8 +300,24 @@ jobs:
         mkdir -p target/release
         cp target/production/polkadot target/release/polkadot
 
+        echo "Listing target dir:"
+        ls -l target/
+
+        echo "Listing release dir:"
+        ls -l target/release/
+
+        echo "Listing rpmbuild dir:"
+        ls -l target/release/rpmbuild/
+
+        echo "Listing RPMs dir:"
+        ls -l target/release/rpmbuild/RPMs/
+
+        echo "Listing x86 dir:"
+        ls -l target/release/rpmbuild/RPMs/x86_64/
+
     - name: Build polkadot rpm package
       shell: bash
+      working-directory: ./bin/node/cli
       run: |
         . "${GITHUB_WORKSPACE}"/.github/scripts/common/lib.sh
         VERSION=$(get_polkadot_node_version_from_code)
