@@ -5,7 +5,7 @@ license = "GPL-3.0-only"
 rust-version = "1.64.0"
 readme = "README.md"
 authors = ["Parity Technologies <admin@parity.io>"]
-edition.workspace = true
+edition = "2021"
 version = "6.0.0"
 default-run = "polkadot"
 homepage = "https://paritytech.github.io/polkadot-sdk/"
@@ -54,9 +54,10 @@ description = "Implementation of a Polkadot node in Rust based on the Substrate 
 license = "GPL-3.0-only"
 
 [package.metadata.rpm.targets]
-polkadot = {}
-polkadot-prepare-worker = {}
-polkadot-execute-worker = {}
+polkadot = { path = "target/release/polkadot" }
+polkadot-prepare-worker = { path = "target/release/polkadot-prepare-worker" }
+polkadot-execute-worker = { path = "target/release/polkadot-execute-worker" }
+
 
 [package.metadata.rpm.assets]
 "scripts/packaging/polkadot.service" = { dest = "/usr/lib/systemd/system/polkadot.service", mode = "644" }
