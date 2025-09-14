@@ -54,9 +54,9 @@ description = "Implementation of a Polkadot node in Rust based on the Substrate 
 license = "GPL-3.0-only"
 
 [package.metadata.rpm.targets]
-polkadot = { path = "target/release/polkadot" }
-polkadot-prepare-worker = { path = "target/release/polkadot-prepare-worker" }
-polkadot-execute-worker = { path = "target/release/polkadot-execute-worker" }
+polkadot = { path = "../target/release/polkadot" }
+polkadot-prepare-worker = { path = "../target/release/polkadot-prepare-worker" }
+polkadot-execute-worker = { path = "../target/release/polkadot-execute-worker" }
 
 
 [package.metadata.rpm.assets]
