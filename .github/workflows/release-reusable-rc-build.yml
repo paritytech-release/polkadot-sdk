@@ -295,14 +295,13 @@ jobs:
         VERSION=$(get_polkadot_node_version_from_code)
         . "${GITHUB_WORKSPACE}"/.github/scripts/release/build-deb.sh ${{ inputs.package }} ${VERSION}
 
-    - name: Prepare binary for RPM build
-      run: |
-        mkdir -p target/release
-        cp target/production/polkadot target/release/polkadot
+    #- name: Prepare binary for RPM build
+    #  run: |
+    #    mkdir -p target/release
+    #    cp target/production/polkadot target/release/polkadot
 
     - name: Build polkadot rpm package
       shell: bash
-      working-directory: ./polkadot
       run: |
         . "${GITHUB_WORKSPACE}"/.github/scripts/common/lib.sh
         VERSION=$(get_polkadot_node_version_from_code)

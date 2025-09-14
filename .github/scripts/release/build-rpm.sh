@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 set -e
 
-# This script builds an RPM package from pre-compiled binaries using fpm.
-
 # --- Configuration ---
 PRODUCT=${1:?"Usage: $0 <product_name> <version>"}
 VERSION=${2:?"Usage: $0 <product_name> <version>"}
 PROFILE=${PROFILE:-production}
 ARCH="x86_64"
 
-# CORRECTED PATH: Points to the workspace target directory
-SOURCE_DIR="../target/${PROFILE}"
+SOURCE_DIR="target/${PROFILE}"
 STAGING_DIR="/tmp/${PRODUCT}-staging"
-# CORRECTED PATH: Points to the workspace production artifacts directory
-DEST_DIR="../target/production"
+DEST_DIR="target/production"
 
 # --- Script Start ---
 echo "📦 Starting RPM build for '$PRODUCT' version '$VERSION'..."
@@ -30,7 +26,8 @@ echo "📂 Copying application files..."
 cp "${SOURCE_DIR}/${PRODUCT}" "${STAGING_DIR}/usr/bin/"
 cp "${SOURCE_DIR}/${PRODUCT}-prepare-worker" "${STAGING_DIR}/usr/lib/${PRODUCT}/"
 cp "${SOURCE_DIR}/${PRODUCT}-execute-worker" "${STAGING_DIR}/usr/lib/${PRODUCT}/"
-cp "scripts/packaging/polkadot.service" "${STAGING_DIR}/usr/lib/systemd/system/"
+# MODIFIED PATH: Prefixed with the subdirectory name
+cp "polkadot/scripts/packaging/polkadot.service" "${STAGING_DIR}/usr/lib/systemd/system/"
 
 # 3. Use fpm to package the staging directory into an RPM
 echo "🎁 Running fpm to create the RPM package..."
