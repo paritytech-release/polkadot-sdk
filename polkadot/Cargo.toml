@@ -4,12 +4,12 @@ description = "Implementation of a `https://polkadot.com` node in Rust based on 
 license = "GPL-3.0-only"
 rust-version = "1.64.0"
 readme = "README.md"
-authors = ["Parity Technologies <admin@parity.io>"]
-edition = "2021"
+authors.workspace = true
+edition.workspace = true
 version = "6.0.0"
 default-run = "polkadot"
-homepage = "https://paritytech.github.io/polkadot-sdk/"
-repository = "https://github.com/paritytech/polkadot-sdk.git"
+homepage.workspace = true
+repository.workspace = true
 
 [badges]
 maintenance = { status = "actively-developed" }
@@ -52,16 +52,6 @@ package = "polkadot"
 summary = "Polkadot client based on the Substrate framework."
 description = "Implementation of a Polkadot node in Rust based on the Substrate framework."
 license = "GPL-3.0-only"
-
-[package.metadata.rpm.targets]
-polkadot = { path = "../target/release/polkadot" }
-polkadot-prepare-worker = { path = "../target/release/polkadot-prepare-worker" }
-polkadot-execute-worker = { path = "../target/release/polkadot-execute-worker" }
-
-
-[package.metadata.rpm.assets]
-"scripts/packaging/polkadot.service" = { dest = "/usr/lib/systemd/system/polkadot.service", mode = "644" }
-
 
 [package.metadata.spellcheck]
 config = "./scripts/ci/gitlab/spellcheck.toml"
