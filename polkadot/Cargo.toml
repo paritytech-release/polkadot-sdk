@@ -47,12 +47,6 @@ assets = [
 ]
 conf-files = ["/etc/default/polkadot"]
 
-[package.metadata.rpm]
-package = "polkadot"
-summary = "Polkadot client based on the Substrate framework."
-description = "Implementation of a Polkadot node in Rust based on the Substrate framework."
-license = "GPL-3.0-only"
-
 [package.metadata.spellcheck]
 config = "./scripts/ci/gitlab/spellcheck.toml"
 
