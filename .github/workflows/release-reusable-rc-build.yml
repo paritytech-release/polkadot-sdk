@@ -213,6 +213,19 @@ jobs:
           mkdir -p ~/.gnupg/
           touch ~/.gnupg/dirmngr.conf
           echo "standard-resolver" >  ~/.gnupg/dirmngr.conf
+
+      - name: Install llvm
+        run: |
+          brew install llvm@21
+
+      - name: Set dynamic library path
+        run: |
+          LLVM_PATH=$(brew --prefix llvm)
+          export LIBCLANG_PATH="$LLVM_PATH/lib"
+          export LDFLAGS="-L$LLVM_PATH/lib"
+          export CPPFLAGS="-I$LLVM_PATH/include"
+          echo "DYLD_LIBRARY_PATH=$LLVM_PATH/lib" >> $GITHUB_ENV
+
       - name: Install sha256sum
         run: |
           brew install coreutils
@@ -267,7 +280,7 @@ jobs:
           name: ${{ matrix.binaries }}_${{ inputs.target }}
           path: ${{ env.ARTIFACTS_PATH }}
 
-  build-polkadot-deb-package:
+  build-polkadot-deb-and-rpm-package:
     if: ${{ inputs.package == 'polkadot' && inputs.target == 'x86_64-unknown-linux-gnu' }}
     needs: [build-rc]
     runs-on: ubuntu-latest
@@ -278,6 +291,7 @@ jobs:
       with:
         ref: ${{ inputs.release_tag }}
         fetch-depth: 0
+
 
     - name: Download polkadot_x86_64-unknown-linux-gnu artifacts
       uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
@@ -300,6 +314,17 @@ jobs:
         path: target/production
         merge-multiple: true
 
+    - name: Install rpmbuild
+      run: sudo apt-get update && sudo apt-get install -y rpm
+
+    - name: Set up Ruby
+      uses: actions/setup-ruby@v1
+      with:
+        ruby-version: '3.2'
+
+    - name: Install fpm
+      run: gem install fpm
+
     - name: Build polkadot deb package
       shell: bash
       run: |
@@ -307,10 +332,24 @@ jobs:
         VERSION=$(get_polkadot_node_version_from_code)
         . "${GITHUB_WORKSPACE}"/.github/scripts/release/build-deb.sh ${{ inputs.package }} ${VERSION}
 
+    #- name: Prepare binary for RPM build
+    #  run: |
+    #    mkdir -p target/release
+    #    cp target/production/polkadot target/release/polkadot
+
+    - name: Build polkadot rpm package
+      shell: bash
+      run: |
+        . "${GITHUB_WORKSPACE}"/.github/scripts/common/lib.sh
+        VERSION=$(get_polkadot_node_version_from_code)
+        . "${GITHUB_WORKSPACE}"/.github/scripts/release/build-rpm.sh ${{ inputs.package }} ${VERSION}
+
     - name: Generate artifact attestation
       uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
       with:
-        subject-path: target/production/*.deb
+        subject-path: |
+          target/production/*.deb
+          target/production/*.rpm
 
     - name: Upload ${{inputs.package }} artifacts
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -321,7 +360,7 @@ jobs:
 
   upload-polkadot-artifacts-to-s3:
     if: ${{ inputs.package == 'polkadot' && inputs.target == 'x86_64-unknown-linux-gnu' }}
-    needs: [build-polkadot-deb-package]
+    needs: [build-polkadot-deb-and-rpm-package]
     uses: ./.github/workflows/release-reusable-s3-upload.yml
     with:
       package: ${{ inputs.package }}
