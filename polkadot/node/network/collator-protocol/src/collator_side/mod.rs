@@ -468,12 +468,12 @@ async fn distribute_collation<Context>(
 	let per_relay_parent = match state.per_relay_parent.get_mut(&candidate_relay_parent) {
 		Some(per_relay_parent) => per_relay_parent,
 		None => {
-			gum::debug!(
+			gum::warn!(
 				target: LOG_TARGET,
 				para_id = %id,
 				candidate_relay_parent = %candidate_relay_parent,
 				candidate_hash = ?candidate_hash,
-				"Candidate relay parent is out of our view",
+				"Dropping candidate: candidate relay parent is out of our view",
 			);
 			return Ok(());
 		},
@@ -1205,8 +1205,9 @@ async fn handle_incoming_request<Context>(
 			};
 
 			let collation_with_core = match &req {
-				VersionedCollationRequest::V2(req) =>
-					per_relay_parent.collations.get_mut(&req.payload.candidate_hash),
+				VersionedCollationRequest::V2(req) => {
+					per_relay_parent.collations.get_mut(&req.payload.candidate_hash)
+				},
 			};
 			let (receipt, pov, parent_head_data) =
 				if let Some(collation_with_core) = collation_with_core {
@@ -1276,6 +1277,53 @@ async fn handle_incoming_request<Context>(
 	Ok(())
 }
 
+/// Advertises collations for the given relay parents to the specified peer.
+///
+/// Returns a list of unknown relay parents.
+#[overseer::contextbounds(CollatorProtocol, prefix = self::overseer)]
+async fn advertise_collations_for_relay_parents<Context>(
+	ctx: &mut Context,
+	state: &mut State,
+	peer_id: &PeerId,
+	relay_parents: impl IntoIterator<Item = Hash>,
+) -> Vec<Hash> {
+	let mut unknown_relay_parents = Vec::new();
+
+	for relay_parent in relay_parents {
+		let block_hashes = match state.per_relay_parent.contains_key(&relay_parent) {
+			true => state
+				.implicit_view
+				.as_ref()
+				.and_then(|implicit_view| {
+					implicit_view
+						.known_allowed_relay_parents_under(&relay_parent, state.collating_on)
+				})
+				.unwrap_or_default(),
+			false => {
+				unknown_relay_parents.push(relay_parent);
+				continue;
+			},
+		};
+
+		for block_hash in block_hashes {
+			if let Some(per_relay_parent) = state.per_relay_parent.get_mut(block_hash) {
+				advertise_collation(
+					ctx,
+					*block_hash,
+					per_relay_parent,
+					peer_id,
+					&state.peer_ids,
+					&mut state.advertisement_timeouts,
+					&state.metrics,
+				)
+				.await;
+			}
+		}
+	}
+
+	unknown_relay_parents
+}
+
 /// Peer's view has changed. Send advertisements for new relay parents
 /// if there're any.
 #[overseer::contextbounds(CollatorProtocol, prefix = self::overseer)]
@@ -1285,52 +1333,29 @@ async fn handle_peer_view_change<Context>(
 	peer_id: PeerId,
 	view: View,
 ) {
-	let Some(PeerData { view: current, unknown_heads }) = state.peer_data.get_mut(&peer_id) else {
+	let Some(added) = state.peer_data.get_mut(&peer_id).map(|peer| {
+		let diff: Vec<Hash> = view.difference(&peer.view).cloned().collect();
+		peer.view = view;
+		diff
+	}) else {
 		return;
 	};
 
-	let added: Vec<Hash> = view.difference(&*current).cloned().collect();
+	let unknown_relay_parents =
+		advertise_collations_for_relay_parents(ctx, state, &peer_id, added).await;
 
-	*current = view;
+	if !unknown_relay_parents.is_empty() {
+		gum::trace!(
+			target: LOG_TARGET,
+			?peer_id,
+			new_leaves = ?unknown_relay_parents,
+			"New leaves in peer's view are unknown",
+		);
 
-	for added in added.into_iter() {
-		let block_hashes = match state.per_relay_parent.contains_key(&added) {
-			true => state
-				.implicit_view
-				.as_ref()
-				.and_then(|implicit_view| {
-					implicit_view.known_allowed_relay_parents_under(&added, state.collating_on)
-				})
-				.unwrap_or_default(),
-			false => {
-				gum::trace!(
-					target: LOG_TARGET,
-					?peer_id,
-					new_leaf = ?added,
-					"New leaf in peer's view is unknown",
-				);
-
-				unknown_heads.insert(added, ());
-
-				continue;
-			},
-		};
-
-		for block_hash in block_hashes {
-			let Some(per_relay_parent) = state.per_relay_parent.get_mut(block_hash) else {
-				continue;
-			};
-
-			advertise_collation(
-				ctx,
-				*block_hash,
-				per_relay_parent,
-				&peer_id,
-				&state.peer_ids,
-				&mut state.advertisement_timeouts,
-				&state.metrics,
-			)
-			.await;
+		if let Some(PeerData { unknown_heads, .. }) = state.peer_data.get_mut(&peer_id) {
+			for unknown in unknown_relay_parents {
+				unknown_heads.insert(unknown, ());
+			}
 		}
 	}
 }
@@ -1443,8 +1468,29 @@ async fn handle_network_msg<Context>(
 		UpdatedAuthorityIds(peer_id, authority_ids) => {
 			gum::trace!(target: LOG_TARGET, ?peer_id, ?authority_ids, "Updated authority ids");
 			if state.peer_data.contains_key(&peer_id) {
-				if state.peer_ids.insert(peer_id, authority_ids).is_none() {
+				let is_new_peer = state.peer_ids.insert(peer_id, authority_ids).is_none();
+
+				if is_new_peer {
 					declare(ctx, state, &peer_id).await;
+				} else {
+					// Authority IDs changed for an existing peer. Re-advertise collations
+					// for relay parents already in their view, as the previous authority IDs
+					// may not have matched our validator groups.
+					let relay_parents_in_view: Vec<_> = state
+						.peer_data
+						.get(&peer_id)
+						.map(|data| data.view.iter().cloned().collect())
+						.unwrap_or_default();
+
+					// Unknown relay parents are ignored because they were
+					// handled when the peer's view was first processed.
+					let _ = advertise_collations_for_relay_parents(
+						ctx,
+						state,
+						&peer_id,
+						relay_parents_in_view,
+					)
+					.await;
 				}
 			}
 		},
@@ -1676,7 +1722,7 @@ fn process_out_of_view_collation(
 	let candidate_hash = collation.receipt.hash();
 
 	match collation.status {
-		CollationStatus::Created =>
+		CollationStatus::Created => {
 			if is_same_session {
 				gum::warn!(
 					target: LOG_TARGET,
@@ -1691,7 +1737,8 @@ fn process_out_of_view_collation(
 					pov_hash = ?collation.pov.hash(),
 					"Collation wasn't advertised because it was built on a relay chain block that is now part of an old session.",
 				)
-			},
+			}
+		},
 		CollationStatus::Advertised => gum::debug!(
 			target: LOG_TARGET,
 			?candidate_hash,
@@ -1712,7 +1759,7 @@ fn process_out_of_view_collation(
 	let Some(mut stats) = collation_with_core.take_stats() else { return };
 
 	// If the collation stats are still available, it means it was never
-	// succesfully fetched, even if a fetch request was received, but not succeed.
+	// successfully fetched, even if a fetch request was received, but not succeed.
 	//
 	// Will expire in it's current state at the next block import.
 	stats.set_pre_backing_status(collation_status);
