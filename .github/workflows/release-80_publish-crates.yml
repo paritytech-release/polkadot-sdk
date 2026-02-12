@@ -34,6 +34,7 @@ jobs:
     uses: paritytech-release/sync-workflows/.github/workflows/check-synchronization.yml@main
     secrets:
       fork_writer_app_key: ${{ secrets.UPSTREAM_CONTENT_SYNC_APP_KEY }}
+
   set-image:
     runs-on: ubuntu-latest
     outputs:
