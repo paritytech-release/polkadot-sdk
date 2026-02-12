@@ -69,6 +69,7 @@ jobs:
 
       - name: Derive stable branch from release name
         id: derive_branch
+        shell: bash
         run: |
           RELEASE_NAME="${{ inputs.release_name }}"
           echo "Release name: $RELEASE_NAME"
@@ -112,6 +113,7 @@ jobs:
           git config --global user.signingKey "D8018FBB3F534D866A45998293C5FB5F6A367B51"
 
       - name: Create or switch to release branch
+        shell: bash
         run: |
           CRATES_RELEASE_BRANCH="${{ steps.derive_branch.outputs.CRATES_RELEASE_BRANCH }}"
 
@@ -125,6 +127,7 @@ jobs:
           echo "On branch $CRATES_RELEASE_BRANCH"
 
       - name: Install Rust 1.93
+        shell: bash
         run: |
           rustup install 1.93
           rustup default 1.93
@@ -159,6 +162,7 @@ jobs:
 
       - name: Parse crate names for release notes
         if: inputs.is_patch
+        shell: bash
         run: |
           RELEASE_NAME="${{ inputs.release_name }}"
 
@@ -220,6 +224,7 @@ jobs:
           echo "Successfully pushed $CRATES_RELEASE_BRANCH"
 
       - name: Configure cargo registry
+        shell: bash
         run: |
           REGISTRY="${{ inputs.registry }}"
           echo "Configuring cargo for $REGISTRY..."
@@ -238,6 +243,7 @@ jobs:
           cat ~/.cargo/config.toml || echo "(using defaults)"
 
       - name: Publish crates
+        shell: bash
         env:
           PARITY_PUBLISH_CRATESIO_TOKEN: ${{ inputs.registry == 'staging.crates.io' && secrets.STAGING_CRATES_IO_API_TOKEN || secrets.CRATES_IO_API_TOKEN }}
         run: |
