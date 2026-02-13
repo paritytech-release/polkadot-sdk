@@ -126,134 +126,134 @@ jobs:
           fi
           echo "On branch $CRATES_RELEASE_BRANCH"
 
-      - name: Install Rust 1.93
-        shell: bash
-        run: |
-          rustup install 1.93
-          rustup default 1.93
-          echo "Rust version:"
-          rustc --version
-          cargo --version
+      # - name: Install Rust 1.93
+      #   shell: bash
+      #   run: |
+      #     rustup install 1.93
+      #     rustup default 1.93
+      #     echo "Rust version:"
+      #     rustc --version
+      #     cargo --version
 
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        with:
-          cache-on-failure: true
+      # - name: Rust Cache
+      #   uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      #   with:
+      #     cache-on-failure: true
 
-      - name: Install parity-publish
-        run: |
-          apt-get update && apt-get install -y --no-install-recommends libcurl4-openssl-dev pkg-config
-          cargo install parity-publish@0.10.9 --locked -q
+      # - name: Install parity-publish
+      #   run: |
+      #     apt-get update && apt-get install -y --no-install-recommends libcurl4-openssl-dev pkg-config
+      #     cargo install parity-publish@0.10.9 --locked -q
 
-      - name: Run parity-publish plan
-        run: |
-          echo "Running parity-publish plan..."
-          parity-publish plan --prdoc prdoc
+      # - name: Run parity-publish plan
+      #   run: |
+      #     echo "Running parity-publish plan..."
+      #     parity-publish plan --prdoc prdoc
 
-      - name: Save Plan.toml diff
-        if: inputs.is_patch
-        run: |
-          RELEASE_NAME="${{ inputs.release_name }}"
-          mkdir -p release-artifacts
+      # - name: Save Plan.toml diff
+      #   if: inputs.is_patch
+      #   run: |
+      #     RELEASE_NAME="${{ inputs.release_name }}"
+      #     mkdir -p release-artifacts
 
-          echo "Saving Plan.toml diff..."
-          git diff Plan.toml > "release-artifacts/changed_crates_${RELEASE_NAME}.txt"
+      #     echo "Saving Plan.toml diff..."
+      #     git diff Plan.toml > "release-artifacts/changed_crates_${RELEASE_NAME}.txt"
 
-          echo "Plan.toml changes:"
-          cat "release-artifacts/changed_crates_${RELEASE_NAME}.txt"
+      #     echo "Plan.toml changes:"
+      #     cat "release-artifacts/changed_crates_${RELEASE_NAME}.txt"
 
-      - name: Parse crate names for release notes
-        if: inputs.is_patch
-        shell: bash
-        run: |
-          RELEASE_NAME="${{ inputs.release_name }}"
+      # - name: Parse crate names for release notes
+      #   if: inputs.is_patch
+      #   shell: bash
+      #   run: |
+      #     RELEASE_NAME="${{ inputs.release_name }}"
 
-          echo "Parsing crate names..."
-          python3 scripts/release/parse-crates-names.py \
-            "release-artifacts/changed_crates_${RELEASE_NAME}.txt" \
-            scripts/release/templates/crates_list.md.tera
+      #     echo "Parsing crate names..."
+      #     python3 scripts/release/parse-crates-names.py \
+      #       "release-artifacts/changed_crates_${RELEASE_NAME}.txt" \
+      #       scripts/release/templates/crates_list.md.tera
 
-          echo "Crates list:"
-          cat scripts/release/templates/crates_list.md.tera
+      #     echo "Crates list:"
+      #     cat scripts/release/templates/crates_list.md.tera
 
-      - name: Commit Plan.toml and crates list
-        shell: bash
-        run: |
-          . ./.github/scripts/release/release_lib.sh
+      # - name: Commit Plan.toml and crates list
+      #   shell: bash
+      #   run: |
+      #     . ./.github/scripts/release/release_lib.sh
 
-          git add Plan.toml
-          if [ "${{ inputs.is_patch }}" = true ]; then
-            git add scripts/release/templates/crates_list.md.tera
-          fi
+      #     git add Plan.toml
+      #     if [ "${{ inputs.is_patch }}" = true ]; then
+      #       git add scripts/release/templates/crates_list.md.tera
+      #     fi
 
-          if [[ -n $(git status --porcelain) ]]; then
-            commit_with_message "chore: update Plan.toml and crates list for ${{ inputs.release_name }}"
-            echo "Committed Plan.toml and crates list"
-          else
-            echo "No changes to commit"
-          fi
+      #     if [[ -n $(git status --porcelain) ]]; then
+      #       commit_with_message "chore: update Plan.toml and crates list for ${{ inputs.release_name }}"
+      #       echo "Committed Plan.toml and crates list"
+      #     else
+      #       echo "No changes to commit"
+      #     fi
 
-      - name: Run parity-publish apply
-        run: |
-          echo "Running parity-publish apply..."
-          parity-publish apply
+      # - name: Run parity-publish apply
+      #   run: |
+      #     echo "Running parity-publish apply..."
+      #     parity-publish apply
 
-      - name: Update Cargo.lock
-        run: |
-          echo "Updating Cargo.lock..."
-          cargo update --workspace --offline || cargo update --workspace
-          echo "Cargo.lock updated"
+      # - name: Update Cargo.lock
+      #   run: |
+      #     echo "Updating Cargo.lock..."
+      #     cargo update --workspace --offline || cargo update --workspace
+      #     echo "Cargo.lock updated"
 
-      - name: Commit version bumps
-        shell: bash
-        run: |
-          . ./.github/scripts/release/release_lib.sh
+      # - name: Commit version bumps
+      #   shell: bash
+      #   run: |
+      #     . ./.github/scripts/release/release_lib.sh
 
-          git add -A
+      #     git add -A
 
-          if [[ -n $(git status --porcelain) ]]; then
-            commit_with_message "chore: apply version bumps for ${{ inputs.release_name }}"
-            echo "Committed version bumps"
-          else
-            echo "No changes to commit"
-          fi
+      #     if [[ -n $(git status --porcelain) ]]; then
+      #       commit_with_message "chore: apply version bumps for ${{ inputs.release_name }}"
+      #       echo "Committed version bumps"
+      #     else
+      #       echo "No changes to commit"
+      #     fi
 
-      - name: Configure cargo registry
-        shell: bash
-        run: |
-          REGISTRY="${{ inputs.registry }}"
-          echo "Configuring cargo for $REGISTRY..."
-          mkdir -p ~/.cargo
+      # - name: Configure cargo registry
+      #   shell: bash
+      #   run: |
+      #     REGISTRY="${{ inputs.registry }}"
+      #     echo "Configuring cargo for $REGISTRY..."
+      #     mkdir -p ~/.cargo
 
-          if [ "$REGISTRY" = "staging.crates.io" ]; then
-            cat >> ~/.cargo/config.toml << 'EOF'
-          [registries.crates-io]
-          index = "sparse+https://index.staging.crates.io/"
-          EOF
-          else
-            echo "Using default crates.io registry"
-          fi
+      #     if [ "$REGISTRY" = "staging.crates.io" ]; then
+      #       cat >> ~/.cargo/config.toml << 'EOF'
+      #     [registries.crates-io]
+      #     index = "sparse+https://index.staging.crates.io/"
+      #     EOF
+      #     else
+      #       echo "Using default crates.io registry"
+      #     fi
 
-          echo "Cargo config:"
-          cat ~/.cargo/config.toml || echo "(using defaults)"
+      #     echo "Cargo config:"
+      #     cat ~/.cargo/config.toml || echo "(using defaults)"
 
-      - name: Publish crates
-        shell: bash
-        env:
-          PARITY_PUBLISH_CRATESIO_TOKEN: ${{ inputs.registry == 'staging.crates.io' && secrets.STAGING_CRATES_IO_API_TOKEN || secrets.CRATES_IO_API_TOKEN }}
-        run: |
-          DRY_RUN="${{ inputs.dry_run }}"
-          REGISTRY="${{ inputs.registry }}"
+      # - name: Publish crates
+      #   shell: bash
+      #   env:
+      #     PARITY_PUBLISH_CRATESIO_TOKEN: ${{ inputs.registry == 'staging.crates.io' && secrets.STAGING_CRATES_IO_API_TOKEN || secrets.CRATES_IO_API_TOKEN }}
+      #   run: |
+      #     DRY_RUN="${{ inputs.dry_run }}"
+      #     REGISTRY="${{ inputs.registry }}"
 
-          if [ "$DRY_RUN" = true ]; then
-            echo "DRY RUN - Not actually publishing crates"
-            echo "Target registry: $REGISTRY"
-            parity-publish apply -p -d
-          else
-            echo "Publishing crates to $REGISTRY..."
-            parity-publish apply -p
-            echo "Crates published successfully to $REGISTRY!"
-          fi
+      #     if [ "$DRY_RUN" = true ]; then
+      #       echo "DRY RUN - Not actually publishing crates"
+      #       echo "Target registry: $REGISTRY"
+      #       parity-publish apply -p -d
+      #     else
+      #       echo "Publishing crates to $REGISTRY..."
+      #       parity-publish apply -p
+      #       echo "Crates published successfully to $REGISTRY!"
+      #     fi
 
       - name: Generate content write token for the release automation
         id: generate_write_token
