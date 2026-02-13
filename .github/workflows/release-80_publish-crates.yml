@@ -266,11 +266,11 @@ jobs:
 
       - name: Push crates release branch to paritytech/polkadot-sdk
         shell: bash
-        env:
-          GH_TOKEN: ${{ steps.generate_write_token.outputs.token }}
         run: |
           CRATES_RELEASE_BRANCH="${{ steps.derive_branch.outputs.CRATES_RELEASE_BRANCH }}"
-          UPSTREAM_URL="https://x-access-token:${GH_TOKEN}@github.com/paritytech/polkadot-sdk.git"
+          TOKEN="${{ steps.generate_write_token.outputs.token }}"
+          UPSTREAM_URL="https://x-access-token:${TOKEN}@github.com/paritytech/polkadot-sdk.git"
+
           echo "Pushing branch $CRATES_RELEASE_BRANCH to paritytech/polkadot-sdk..."
           git push "$UPSTREAM_URL" "HEAD:refs/heads/$CRATES_RELEASE_BRANCH"
           echo "Successfully pushed $CRATES_RELEASE_BRANCH to paritytech/polkadot-sdk"
