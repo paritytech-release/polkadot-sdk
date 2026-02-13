@@ -218,13 +218,6 @@ jobs:
             echo "No changes to commit"
           fi
 
-      - name: Push release branch
-        run: |
-          CRATES_RELEASE_BRANCH="${{ steps.derive_branch.outputs.CRATES_RELEASE_BRANCH }}"
-          echo "Pushing branch $CRATES_RELEASE_BRANCH..."
-          git push origin "$CRATES_RELEASE_BRANCH"
-          echo "Successfully pushed $CRATES_RELEASE_BRANCH"
-
       - name: Configure cargo registry
         shell: bash
         run: |
@@ -261,3 +254,23 @@ jobs:
             parity-publish apply -p
             echo "Crates published successfully to $REGISTRY!"
           fi
+
+      - name: Generate content write token for the release automation
+        id: generate_write_token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        with:
+            app-id: ${{ vars.POLKADOT_SDK_RELEASE_RW_APP_ID }}
+            private-key: ${{ secrets.POLKADOT_SDK_RELEASE_RW_APP_KEY }}
+            owner: paritytech
+            repositories: polkadot-sdk
+
+      - name: Push crates release branch to paritytech/polkadot-sdk
+        shell: bash
+        env:
+          GH_TOKEN: ${{ steps.generate_write_token.outputs.token }}
+        run: |
+          CRATES_RELEASE_BRANCH="${{ steps.derive_branch.outputs.CRATES_RELEASE_BRANCH }}"
+          UPSTREAM_URL="https://x-access-token:${GH_TOKEN}@github.com/paritytech/polkadot-sdk.git"
+          echo "Pushing branch $CRATES_RELEASE_BRANCH to paritytech/polkadot-sdk..."
+          git push "$UPSTREAM_URL" "HEAD:refs/heads/$CRATES_RELEASE_BRANCH"
+          echo "Successfully pushed $CRATES_RELEASE_BRANCH to paritytech/polkadot-sdk"
