@@ -88,11 +88,21 @@ jobs:
 
           echo "CRATES_RELEASE_BRANCH=post-crates-release-$RELEASE_NAME" >> $GITHUB_OUTPUT
 
+      - name: Generate content write token for the release automation
+        id: generate_write_token
+        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
+        with:
+            app-id: ${{ vars.POLKADOT_SDK_RELEASE_RW_APP_ID }}
+            private-key: ${{ secrets.POLKADOT_SDK_RELEASE_RW_APP_KEY }}
+            owner: paritytech
+            repositories: polkadot-sdk
+
       - name: Checkout stable branch
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           ref: ${{ steps.derive_branch.outputs.STABLE_BRANCH }}
           fetch-depth: 0
+          token: ${{ steps.generate_write_token.outputs.token }}
 
       - name: Import GPG keys
         shell: bash
@@ -254,15 +264,6 @@ jobs:
       #       parity-publish apply -p
       #       echo "Crates published successfully to $REGISTRY!"
       #     fi
-
-      - name: Generate content write token for the release automation
-        id: generate_write_token
-        uses: actions/create-github-app-token@29824e69f54612133e76f7eaac726eef6c875baf # v2.2.1
-        with:
-            app-id: ${{ vars.POLKADOT_SDK_RELEASE_RW_APP_ID }}
-            private-key: ${{ secrets.POLKADOT_SDK_RELEASE_RW_APP_KEY }}
-            owner: paritytech
-            repositories: polkadot-sdk
 
       - name: Push crates release branch to paritytech/polkadot-sdk
         shell: bash
