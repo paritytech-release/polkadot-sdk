@@ -271,6 +271,9 @@ jobs:
         run: |
           CRATES_RELEASE_BRANCH="${{ steps.derive_branch.outputs.CRATES_RELEASE_BRANCH }}"
           UPSTREAM_URL="https://x-access-token:${GH_TOKEN}@github.com/paritytech/polkadot-sdk.git"
+
+          gh auth setup-git
+
           echo "Pushing branch $CRATES_RELEASE_BRANCH to paritytech/polkadot-sdk..."
           git push "$UPSTREAM_URL" "HEAD:refs/heads/$CRATES_RELEASE_BRANCH"
           echo "Successfully pushed $CRATES_RELEASE_BRANCH to paritytech/polkadot-sdk"
