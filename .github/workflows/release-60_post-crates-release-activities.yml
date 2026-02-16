@@ -328,17 +328,18 @@ jobs:
             echo "PR URL: $(gh pr view $EXISTING_PR --repo paritytech/polkadot-sdk --json url --jq '.url')"
           else
             echo "Creating PR from $FORK_HEAD to $BASE_RELEASE in paritytech/polkadot-sdk..."
-            gh pr create \
-              --repo paritytech/polkadot-sdk \
-              --title "[${BASE_RELEASE}] Post crates release activities for $FULL_RELEASE" \
-              --body "Automated PR containing post-crates-release activities:
+            # Use REST API instead of `gh pr create` because GitHub App tokens cannot create cross-fork PRs via the GraphQL API.
+            gh api repos/paritytech/polkadot-sdk/pulls \
+              --method POST \
+              -f title="[${BASE_RELEASE}] Post crates release activities for $FULL_RELEASE" \
+              -f body="Automated PR containing post-crates-release activities:
           - NODE_VERSION bumps (if selected)
           - Path dependencies replacement
           - Zepter fixes
           - Taplo formatting
           - PRDocs reorganization (if prdocs exist)" \
-              --base "$BASE_RELEASE" \
-              --head "$FORK_HEAD"
+              -f base="$BASE_RELEASE" \
+              -f head="$FORK_HEAD"
             echo "PR created successfully"
           fi
 
