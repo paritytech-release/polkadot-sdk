@@ -316,19 +316,30 @@ jobs:
             BASE_RELEASE="$FULL_RELEASE"
           fi
 
-          # Cross-fork PR: head is in the fork, base is in the upstream repo
-          FORK_HEAD="paritytech-release:$BRANCH_NAME"
+          TARGET_REPO="paritytech/polkadot-sdk"
+
+          # Determine if running from a fork or the main repo
+          if [ "${{ github.repository }}" = "$TARGET_REPO" ]; then
+            # Same-repo PR: head is just the branch name
+            PR_HEAD="$BRANCH_NAME"
+            EXTRA_FLAGS=""
+          else
+            # Cross-fork PR: head needs the fork owner prefix
+            FORK_OWNER="${{ github.repository_owner }}"
+            PR_HEAD="${FORK_OWNER}:${BRANCH_NAME}"
+            EXTRA_FLAGS="--no-maintainer-edit"
+          fi
 
           # Check if PR already exists
-          EXISTING_PR=$(gh pr list --repo paritytech/polkadot-sdk --head "$FORK_HEAD" --base "$BASE_RELEASE" --json number --jq '.[0].number')
+          EXISTING_PR=$(gh pr list --repo "$TARGET_REPO" --head "$PR_HEAD" --base "$BASE_RELEASE" --json number --jq '.[0].number')
 
           if [ -n "$EXISTING_PR" ]; then
             echo "✅ PR #$EXISTING_PR already exists for this branch"
-            echo "PR URL: $(gh pr view $EXISTING_PR --repo paritytech/polkadot-sdk --json url --jq '.url')"
+            echo "PR URL: $(gh pr view $EXISTING_PR --repo "$TARGET_REPO" --json url --jq '.url')"
           else
-            echo "Creating PR from $FORK_HEAD to $BASE_RELEASE in paritytech/polkadot-sdk..."
+            echo "Creating PR from $PR_HEAD to $BASE_RELEASE in $TARGET_REPO..."
             gh pr create \
-              --repo paritytech/polkadot-sdk \
+              --repo "$TARGET_REPO" \
               --title "[${BASE_RELEASE}] Post crates release activities for $FULL_RELEASE" \
               --body "Automated PR containing post-crates-release activities:
           - NODE_VERSION bumps (if selected)
@@ -337,8 +348,8 @@ jobs:
           - Taplo formatting
           - PRDocs reorganization (if prdocs exist)" \
               --base "$BASE_RELEASE" \
-              --head "$FORK_HEAD" \
-              --no-maintainer-edit
+              --head "$PR_HEAD" \
+              $EXTRA_FLAGS
             echo "PR created successfully"
           fi
 
@@ -348,14 +359,22 @@ jobs:
         shell: bash
         run: |
           BRANCH_NAME="${{ github.ref_name }}"
-          FORK_HEAD="paritytech-release:$BRANCH_NAME"
+          TARGET_REPO="paritytech/polkadot-sdk"
+
+          # Match the head format used when creating the PR
+          if [ "${{ github.repository }}" = "$TARGET_REPO" ]; then
+            PR_HEAD="$BRANCH_NAME"
+          else
+            FORK_OWNER="${{ github.repository_owner }}"
+            PR_HEAD="${FORK_OWNER}:${BRANCH_NAME}"
+          fi
 
           # Find the PR number for this branch in the upstream repo
-          PR_NUMBER=$(gh pr list --repo paritytech/polkadot-sdk --head "$FORK_HEAD" --json number --jq '.[0].number')
+          PR_NUMBER=$(gh pr list --repo "$TARGET_REPO" --head "$PR_HEAD" --json number --jq '.[0].number')
 
           if [ -n "$PR_NUMBER" ]; then
             echo "Adding comment to PR #$PR_NUMBER..."
-            gh pr comment "$PR_NUMBER" --repo paritytech/polkadot-sdk --body "⚠️ **Reminder:** If spec_version was not bumped automatically as part of this flow. Please ensure it is updated manually if required."
+            gh pr comment "$PR_NUMBER" --repo "$TARGET_REPO" --body "⚠️ **Reminder:** If spec_version was not bumped automatically as part of this flow. Please ensure it is updated manually if required."
           else
-            echo "WARNING: Could not find PR for branch $FORK_HEAD"
+            echo "⚠️ WARNING: Could not find PR for branch $PR_HEAD"
           fi
