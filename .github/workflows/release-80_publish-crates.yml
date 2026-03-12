@@ -94,6 +94,7 @@ jobs:
         with:
           ref: ${{ steps.derive_branch.outputs.STABLE_BRANCH }}
           fetch-depth: 0
+          persist-credentials: false
 
       # - name: Import GPG keys
       #   shell: bash
