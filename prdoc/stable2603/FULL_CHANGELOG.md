@@ -1853,7 +1853,7 @@ The main changes are that
 - Metering now works differently depending on whether the transaction as a whole defines weight and deposit limits ("Substrate execution mode") or just an Ethereum gas limit ("Ethereum execution mode"). The Ethereum execution mode is used for all `eth_transact` extrinsics.
 - There is a third resource (in addition to weight and storage deposits): Ethereum gas. In the Ethereum execution mode this is a shared resource (consumable through weight and through storage deposits).
 
-## Metering logic
+**Metering logic**
 Almost all changes in this PR are confined to the folder `metering` of pallet-revive. Before this PR there were two meters: a weight meter and a gas meter. They have now been combined into a main meter called `ResourceMeter`. Outside code only interacts with the `ResourceMeter` and not individually with the gas or storage meter. The reason is that in Ethereum execution mode gas is a shared resource and interacting with one meter influences the limits of the other meter.
 
 Here are some finer points:
@@ -1873,7 +1873,7 @@ Here are some finer points:
 - The limits of the gas meter and deposit meters are now an `Option<...>`. When it is `None`, then this represents unlimited meters and this is only used for Ethereum style executions (the meters are not really unlimited, there will be a gas limit that effectively limits the resource usages of the weight and deposit meters).
 - In the weight meters, the `sync_to_executor` and `sync_from_executor` are a bit simplified and there is no need for `engine_fuel_left` anymore.
 
-## Other Changes
+**Other Changes**
 - The old name `gas` for weights has been consistently replaced by `weight`
 - `eth_call` and `eth_instantiate_with_code` now take a `weight_limit` (used to ensure that weight does not exceed the max extrinsic weight) and an `eth_gas_limit` (the new externally defined limit)
 - The numeric calculation in `compute_max_integer_quotient` and `compute_max_integer_pair_quotient` (defined in `substrate/frame/revive/src/evm/frees.rs`) are meant to divide a number by the next fee multiplier
@@ -1886,7 +1886,7 @@ Here are some finer points:
 - The function `try_upload_code` now always takes a meter and records the storage deposit charge there
 - In this PR I added logic to correctly handle call stipends (this fixes https://github.com/paritytech/contract-issues/issues/215)
 
-## Fixes
+**Fixes**
 This fixes a couple of issues
 - fixes https://github.com/paritytech/contract-issues/issues/215
 - fixes https://github.com/paritytech/polkadot-sdk/issues/8362
@@ -1895,40 +1895,14 @@ This fixes a couple of issues
 - fixes https://github.com/paritytech/contract-issues/issues/208
 - fixes https://github.com/paritytech/contract-issues/issues/212
 
-## TODOs
-* [x] Ignore deposit refunds for dry running
-* [x] Properly enforce weight limits
-* [x] Fix gas mapping in the tracer
-* [x] Fix (?) gas mapping in block storage (`with_ethereum_context`)
-* [x] Check dry running logic again, and create_call, also in `ExecConfig`
-* [x] Introduce `SignedGas`
-* [x] use `effective_gas_price` instead of next fee multiplier
-  * TBD, also see https://github.com/paritytech/polkadot-sdk/pull/10148#pullrequestreview-3407403361
-* [x] ensure that deducted amount is `effective_gas_price` * used gas
-  * this has already been addressed in https://github.com/paritytech/polkadot-sdk/pull/10148
-* [x] check logic of `ensure_not_overdrawn`
-* [x] Optimize calculations
-* [x] Check whether rounding is done correctly
-* [x] add debug logging
-* [x] Scale gas amounts charged in revm
-  * this has been addressed in another PR: https://github.com/paritytech/polkadot-sdk/pull/10393
-
-Other TODOs
-* [x] fix tests and benchmarks
-* [x] add new tests
-* [x] add code docs
-* [x] resolve merge conflicts
-* [ ] run benchmarks
-* [x] add PR description
-
 #### [#11153]: [eth-rpc]: add resumable block sync and improve CLI arguments
-### Resumable block sync
+**Resumable block sync**
 - New block_sync module syncs backward from the latest finalized block to the first EVM block, with restart-safe checkpoint tracking via a sync_state SQLite table.
 - On restart, fills only the top gap (new blocks) and bottom gap (remaining backfill) without re-syncing completed ranges.
 - Auto-discovers and persists `first_evm_block` — the lowest block with EVM support on the chain.
 - Chain identity verification: validates stored genesis hash on startup to detect database reuse across different chains; verifies sync boundary hashes to detect pruned blocks on the connected node.
 
-### CLI rework
+**CLI rework**
 New `--eth-pruning` flag replaces `--database-url`, `--cache-size`, `--index-last-n-blocks`, and `--earliest-receipt-block`:
 - `--eth-pruning archive` (default): persistent on-disk DB with backward historical sync.
 - `--eth-pruning <N>`: in-memory DB keeping the latest N blocks.
@@ -2067,21 +2041,21 @@ We now have the capability to filter which blocks can be safely pruned. For para
 Add an extrinsic allowing to forcefully remove the existing potential renewal from chain without the need to directly manipulate the storage.
 
 #### [#10767]: Fix auto-renew core tracking on immediate renew
-## Summary
+**Summary**
 Fix auto-renew tracking when `do_enable_auto_renew` triggers an immediate renewal. The auto-renew record now follows the new core index returned by `do_renew`, preventing a stale core from being
 renewed in the next sale rotation.
 
 Discovered by the Darwinia Network team while attempting a renew.
 
-## Problem
+**Problem**
 When enabling auto-renew during the renewal window (`PotentialRenewals` at `sale.region_begin`), `do_enable_auto_renew` immediately calls `do_renew`. That call can allocate a *different* core
 index, but the auto-renew record was stored with the **old** core. On the next rotation, `renew_cores` attempts to renew that stale core and emits `AutoRenewalFailed`, even though the workload has
 already moved to the new core.
 
-## Fix
+**Fix**
 Capture the returned core index from `do_renew` inside `do_enable_auto_renew`, and store that core in `AutoRenewals` (and the enable event).
 
-## Tests
+**Tests**
 - Added `enable_auto_renew_immediate_updates_core_and_renews`
 - `cargo test -p pallet-broker`
 
@@ -2093,5 +2067,3 @@ The reason is that it is broken and will result in spamming errors until we fix 
 
 #### [#10856]: [pallet-broker] add extrinsic to force transfer a region
 Add an extrinsic to `pallet-broker` which allows a privileged origin (`AdminOrigin` or `Root`) to forcefully transfer a region, ignoring its current owner.
-
-
