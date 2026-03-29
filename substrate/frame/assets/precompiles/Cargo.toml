@@ -33,8 +33,8 @@ sp-runtime.workspace = true
 xcm.workspace = true
 
 [dev-dependencies]
-pallet-balances = { path = "../../balances", default-features = false }
-pallet-revive-fixtures = { path = "../../revive/fixtures", default-features = false }
+pallet-balances = { workspace = true, default-features = false }
+pallet-revive-fixtures = { workspace = true, default-features = false }
 test-case = { workspace = true }
 
 [features]
@@ -47,6 +47,8 @@ std = [
 	"k256?/std",
 	"log/std",
 	"pallet-assets/std",
+	"pallet-balances/std",
+	"pallet-revive-fixtures/std",
 	"pallet-revive/std",
 	"pallet-timestamp/std",
 	"scale-info/std",
@@ -61,6 +63,7 @@ runtime-benchmarks = [
 	"frame-system/runtime-benchmarks",
 	"k256",
 	"pallet-assets/runtime-benchmarks",
+	"pallet-balances/runtime-benchmarks",
 	"pallet-revive/runtime-benchmarks",
 	"pallet-timestamp/runtime-benchmarks",
 	"sp-runtime/runtime-benchmarks",
@@ -70,6 +73,7 @@ try-runtime = [
 	"frame-support/try-runtime",
 	"frame-system/try-runtime",
 	"pallet-assets/try-runtime",
+	"pallet-balances/try-runtime",
 	"pallet-revive/try-runtime",
 	"pallet-timestamp/try-runtime",
 	"sp-runtime/try-runtime",
