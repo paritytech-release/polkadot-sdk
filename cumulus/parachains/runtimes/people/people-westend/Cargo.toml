@@ -1,6 +1,6 @@
 [package]
 name = "people-westend-runtime"
-version = "0.1.0"
+version = "0.22.0"
 authors.workspace = true
 edition.workspace = true
 description = "Westend's People parachain runtime"
@@ -13,13 +13,16 @@ workspace = true
 
 [dependencies]
 codec = { features = ["derive"], workspace = true }
+cumulus-pallet-aura-ext = { workspace = true }
+cumulus-pallet-parachain-system = { workspace = true }
+cumulus-pallet-session-benchmarking = { workspace = true }
+cumulus-pallet-weight-reclaim = { workspace = true }
+cumulus-pallet-xcm = { workspace = true }
+cumulus-pallet-xcmp-queue = { workspace = true }
+cumulus-primitives-aura = { workspace = true }
+cumulus-primitives-core = { workspace = true }
+cumulus-primitives-utility = { workspace = true }
 enumflags2 = { workspace = true }
-scale-info = { features = ["derive"], workspace = true }
-serde = { optional = true, features = ["derive"], workspace = true, default-features = true }
-serde_json = { features = ["alloc"], workspace = true }
-tracing = { workspace = true }
-
-# Substrate
 frame-benchmarking = { optional = true, workspace = true }
 frame-executive = { workspace = true }
 frame-metadata-hash-extension = { workspace = true }
@@ -31,6 +34,7 @@ frame-try-runtime = { optional = true, workspace = true }
 pallet-aura = { workspace = true }
 pallet-authorship = { workspace = true }
 pallet-balances = { workspace = true }
+pallet-collator-selection = { workspace = true }
 pallet-dap-satellite = { workspace = true }
 pallet-identity = { workspace = true }
 pallet-message-queue = { workspace = true }
@@ -42,6 +46,15 @@ pallet-timestamp = { workspace = true }
 pallet-transaction-payment = { workspace = true }
 pallet-transaction-payment-rpc-runtime-api = { workspace = true }
 pallet-utility = { workspace = true }
+pallet-xcm = { workspace = true }
+pallet-xcm-benchmarks = { optional = true, workspace = true }
+parachain-info = { workspace = true }
+parachains-common = { workspace = true }
+polkadot-parachain-primitives = { workspace = true }
+polkadot-runtime-common = { workspace = true }
+scale-info = { features = ["derive"], workspace = true }
+serde = { optional = true, features = ["derive"], workspace = true, default-features = true }
+serde_json = { features = ["alloc"], workspace = true }
 sp-api = { workspace = true }
 sp-block-builder = { workspace = true }
 sp-consensus-aura = { workspace = true }
@@ -56,35 +69,16 @@ sp-statement-store = { workspace = true }
 sp-storage = { workspace = true }
 sp-transaction-pool = { workspace = true }
 sp-version = { workspace = true }
-
-# Polkadot
-pallet-xcm = { workspace = true }
-pallet-xcm-benchmarks = { optional = true, workspace = true }
-polkadot-parachain-primitives = { workspace = true }
-polkadot-runtime-common = { workspace = true }
+testnet-parachains-constants = { features = ["westend"], workspace = true }
+tracing = { workspace = true }
 westend-runtime-constants = { workspace = true }
 xcm = { workspace = true }
 xcm-builder = { workspace = true }
 xcm-executor = { workspace = true }
 xcm-runtime-apis = { workspace = true }
 
-# Cumulus
-cumulus-pallet-aura-ext = { workspace = true }
-cumulus-pallet-parachain-system = { workspace = true }
-cumulus-pallet-session-benchmarking = { workspace = true }
-cumulus-pallet-weight-reclaim = { workspace = true }
-cumulus-pallet-xcm = { workspace = true }
-cumulus-pallet-xcmp-queue = { workspace = true }
-cumulus-primitives-aura = { workspace = true }
-cumulus-primitives-core = { workspace = true }
-cumulus-primitives-utility = { workspace = true }
-pallet-collator-selection = { workspace = true }
-parachain-info = { workspace = true }
-parachains-common = { workspace = true }
-testnet-parachains-constants = { features = ["westend"], workspace = true }
-
 [dev-dependencies]
-parachains-runtimes-test-utils = { workspace = true, default-features = true }
+parachains-runtimes-test-utils = { default-features = true, workspace = true }
 
 [build-dependencies]
 substrate-wasm-builder = { optional = true, workspace = true, default-features = true }
