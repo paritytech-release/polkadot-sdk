@@ -85,6 +85,11 @@ on:
         required: true
         type: string
 
+      skip_sync_check:
+        description: Skip the synchronization check (used when called from a parent workflow that already performed the check)
+        type: boolean
+        default: false
+
 permissions:
   contents: write
 
@@ -101,7 +106,7 @@ env:
 
 jobs:
   check-synchronization:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ !inputs.skip_sync_check }}
     uses: paritytech-release/sync-workflows/.github/workflows/check-synchronization.yml@main
     secrets:
       fork_writer_app_key: ${{ secrets.UPSTREAM_CONTENT_SYNC_APP_KEY }}

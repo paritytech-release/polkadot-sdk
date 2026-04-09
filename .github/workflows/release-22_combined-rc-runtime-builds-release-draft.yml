@@ -87,6 +87,7 @@ jobs:
       chain: ${{ inputs.chain }}
       runtime_dir: ${{ inputs.runtime_dir }}
       release_tag: ${{ needs.validate-inputs.outputs.release_tag }}
+      skip_sync_check: true
     secrets: inherit
     permissions:
       id-token: write
@@ -99,6 +100,7 @@ jobs:
     with:
       binary: ${{ inputs.binary }}
       release_tag: ${{ needs.validate-inputs.outputs.release_tag }}
+      skip_sync_check: true
     secrets: inherit
     permissions:
       id-token: write
@@ -115,6 +117,7 @@ jobs:
       runtimes: '${{ needs.build-runtimes-flow.outputs.published_runtimes }}'
       no_runtimes: ${{ inputs.no_runtimes }}
       crates_only: false
+      skip_sync_check: true
     secrets: inherit
 
   trigger-release-draft-without-runtimes:
@@ -126,4 +129,5 @@ jobs:
       build_run_id: ${{ github.run_id }}
       no_runtimes: ${{ inputs.no_runtimes }}
       crates_only: false
+      skip_sync_check: true
     secrets: inherit

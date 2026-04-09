@@ -28,6 +28,10 @@ on:
         description: Tag matching the actual release candidate with the format polkadot-stableYYMM(-X)-rcX
         type: string
         required: true
+      skip_sync_check:
+        description: Skip the synchronization check (used when called from a parent workflow that already performed the check)
+        type: boolean
+        default: false
     outputs:
       final_tag:
         description: "Final release tag without RC suffix (e.g., polkadot-stableYYMM)"
@@ -37,7 +41,7 @@ on:
 jobs:
 
   check-synchronization:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ !inputs.skip_sync_check }}
     uses: paritytech-release/sync-workflows/.github/workflows/check-synchronization.yml@main
     secrets:
       fork_writer_app_key: ${{ secrets.UPSTREAM_CONTENT_SYNC_APP_KEY }}
