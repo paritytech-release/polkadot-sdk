@@ -65,7 +65,7 @@ jobs:
 
   validate-inputs:
     needs: [check-synchronization]
-    if: ${{ !cancelled() && (needs.check-synchronization.result == 'skipped' || needs.check-synchronization.outputs.checks_passed == 'true') }}
+    if: ${{ !cancelled() && github.repository_owner == vars.RELEASE_ORG && vars.RELEASES_ON == 'true' && (needs.check-synchronization.result == 'skipped' || needs.check-synchronization.outputs.checks_passed == 'true') }}
     runs-on: ubuntu-latest
     outputs:
         release_tag: ${{ steps.validate_inputs.outputs.release_tag }}

@@ -25,6 +25,7 @@ on:
 
 jobs:
   validate-inputs:
+    if: ${{ github.repository_owner == vars.RELEASE_ORG && vars.RELEASES_ON == 'true' }}
     runs-on: ubuntu-latest
     outputs:
         release_tag: ${{ steps.validate_inputs.outputs.release_tag }}
