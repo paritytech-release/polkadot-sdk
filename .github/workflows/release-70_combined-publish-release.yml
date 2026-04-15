@@ -69,7 +69,7 @@ jobs:
     with:
       binary: ${{ inputs.binary }}
       release_tag: ${{ inputs.release_tag }}
-      skip_sync_check: true
+
     secrets: inherit
 
   # ==============================================
@@ -82,7 +82,7 @@ jobs:
     with:
       tag: ${{ needs.promote-rc-to-final.outputs.final_tag }}
       distribution: release
-      skip_sync_check: true
+
     secrets: inherit
 
   publish-rpm-package:
@@ -92,7 +92,7 @@ jobs:
     with:
       tag: ${{ needs.promote-rc-to-final.outputs.final_tag }}
       distribution: ${{ inputs.distribution }}
-      skip_sync_check: true
+
     secrets: inherit
 
   # ==============================================
@@ -110,7 +110,7 @@ jobs:
       owner: ${{ inputs.owner }}
       version: ${{ inputs.version }}
       stable_tag: ${{ needs.promote-rc-to-final.outputs.final_tag }}
-      skip_sync_check: true
+
     secrets: inherit
     permissions:
       contents: write
@@ -128,7 +128,7 @@ jobs:
       owner: ${{ inputs.owner }}
       version: ${{ inputs.version }}
       stable_tag: ${{ needs.promote-rc-to-final.outputs.final_tag }}
-      skip_sync_check: true
+
     secrets: inherit
     permissions:
       contents: write
@@ -146,7 +146,7 @@ jobs:
       owner: ${{ inputs.owner }}
       version: ${{ inputs.version }}
       stable_tag: ${{ needs.promote-rc-to-final.outputs.final_tag }}
-      skip_sync_check: true
+
     secrets: inherit
     permissions:
       contents: write
@@ -164,7 +164,7 @@ jobs:
       owner: ${{ inputs.owner }}
       version: ${{ inputs.version }}
       stable_tag: ${{ needs.promote-rc-to-final.outputs.final_tag }}
-      skip_sync_check: true
+
     secrets: inherit
     permissions:
       contents: write
