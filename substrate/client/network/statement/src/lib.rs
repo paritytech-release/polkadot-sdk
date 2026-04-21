@@ -1132,15 +1132,13 @@ where
 				);
 
 				self.network.report_peer(who, rep::STATEMENT_FLOODING);
+
+				// Initiate peer state cleanup in the `NotificationStreamClosed` handler
 				self.network.disconnect_peer(who, self.protocol_name.clone());
+
 				if let Some(ref metrics) = self.metrics {
 					metrics.statement_flooding_detected.inc();
 				}
-
-				// Clean up peer state immediately
-				self.peers.remove(&who);
-				self.pending_initial_syncs.remove(&who);
-				self.initial_sync_peer_queue.retain(|p| *p != who);
 
 				return;
 			}
@@ -1975,6 +1973,19 @@ mod tests {
 			.collect()
 	}
 
+	/// Simulate the network closing the substream for every disconnected
+	/// peer, so the handler runs its per-peer cleanup.
+	async fn dispatch_disconnects(
+		handler: &mut StatementHandler<TestNetwork, TestSync>,
+		network: &TestNetwork,
+	) {
+		for peer in network.get_disconnected_peers() {
+			handler
+				.handle_notification_event(NotificationEvent::NotificationStreamClosed { peer })
+				.await;
+		}
+	}
+
 	#[tokio::test]
 	async fn test_skips_processing_statements_that_already_in_store() {
 		let (mut handler, statement_store, _network, _notification_service, queue_receiver, _) =
@@ -2638,6 +2649,8 @@ mod tests {
 			disconnected
 		);
 
+		dispatch_disconnects(&mut handler, &network).await;
+
 		// Verify peer state was cleaned up
 		assert!(!handler.peers.contains_key(&peer_id), "Peer should be removed from peers map");
 		assert!(
@@ -2738,6 +2751,8 @@ mod tests {
 			disconnected
 		);
 
+		dispatch_disconnects(&mut handler, &network).await;
+
 		assert!(!handler.peers.contains_key(&peer_id), "Peer should be removed from peers map");
 	}
 
@@ -2827,6 +2842,8 @@ mod tests {
 			"Peer should be disconnected after sustained high rate. Disconnected: {:?}",
 			disconnected
 		);
+
+		dispatch_disconnects(&mut handler, &network).await;
 
 		assert!(!handler.peers.contains_key(&peer_id), "Peer should be removed from peers map");
 	}
