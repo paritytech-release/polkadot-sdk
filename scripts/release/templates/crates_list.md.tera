@@ -1,10 +1,31 @@
 The following crates were updated to the corresponding versions:
 
-<details>
-  <summary>Click to see crates list</summary>
-
-- sp-transaction-storage-proof@40.1.0
-- pallet-transaction-storage@44.0.1
-- cumulus-pallet-parachain-system@0.25.1
-
-</details>
+- pallet-revive-proc-macro@0.7.3
+- pallet-revive-uapi@0.12.0
+- pallet-revive-fixtures@0.11.0
+- frame-support@45.1.2
+- sc-client-db@0.51.2
+- pallet-conviction-voting@45.0.2
+- pallet-multi-asset-bounties@0.2.3
+- pallet-revive@0.14.0
+- pallet-assets-precompiles@0.6.0
+- pallet-mmr@45.0.1
+- pallet-xcm-precompiles@0.5.0
+- assets-common@0.29.0
+- asset-test-utils@31.0.0
+- penpal-runtime@0.37.0
+- snowbridge-inbound-queue-primitives@0.9.0
+- asset-hub-rococo-runtime@0.33.0
+- asset-hub-westend-runtime@0.44.0
+- bridge-hub-test-utils@0.30.0
+- emulated-integration-tests-common@30.0.0
+- snowbridge-pallet-inbound-queue-fixtures@0.28.0
+- snowbridge-pallet-inbound-queue-v2-fixtures@0.9.0
+- snowbridge-pallet-inbound-queue@0.20.0
+- snowbridge-pallet-inbound-queue-v2@0.9.0
+- bridge-hub-rococo-runtime@0.27.0
+- bridge-hub-westend-runtime@0.24.0
+- polkadot-sdk@2513.0.0
+- revive-dev-runtime@0.6.0
+- yet-another-parachain-runtime@0.9.0
+- pallet-revive-eth-rpc@0.15.0
