@@ -1380,7 +1380,7 @@ dependencies = [
 
 [[package]]
 name = "asset-hub-westend-runtime"
-version = "0.43.0"
+version = "0.43.1"
 dependencies = [
  "alloy-core",
  "asset-test-utils",
@@ -3422,7 +3422,7 @@ dependencies = [
 
 [[package]]
 name = "collectives-westend-runtime"
-version = "26.0.0"
+version = "26.1.0"
 dependencies = [
  "cumulus-pallet-aura-ext",
  "cumulus-pallet-parachain-system",
@@ -3784,7 +3784,7 @@ dependencies = [
 
 [[package]]
 name = "coretime-westend-runtime"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "cumulus-pallet-aura-ext",
  "cumulus-pallet-parachain-system",
@@ -4289,7 +4289,7 @@ dependencies = [
 
 [[package]]
 name = "cumulus-client-consensus-aura"
-version = "0.29.0"
+version = "0.29.1"
 dependencies = [
  "async-trait",
  "cumulus-client-collator",
@@ -4904,7 +4904,7 @@ dependencies = [
 
 [[package]]
 name = "cumulus-relay-chain-minimal-node"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "array-bytes 6.2.2",
  "async-channel 1.9.0",
@@ -6926,7 +6926,7 @@ dependencies = [
 
 [[package]]
 name = "frame-support"
-version = "46.0.0"
+version = "46.0.1"
 dependencies = [
  "Inflector",
  "aquamarine",
@@ -12148,7 +12148,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-conviction-voting"
-version = "46.0.0"
+version = "46.0.1"
 dependencies = [
  "assert_matches",
  "frame-benchmarking",
@@ -12866,7 +12866,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-multi-asset-bounties"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "docify",
  "frame-benchmarking",
@@ -13659,7 +13659,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-staking-async"
-version = "0.11.0"
+version = "0.11.1"
 dependencies = [
  "anyhow",
  "env_logger 0.11.3",
@@ -14822,7 +14822,7 @@ dependencies = [
 
 [[package]]
 name = "people-westend-runtime"
-version = "0.22.0"
+version = "0.22.1"
 dependencies = [
  "cumulus-pallet-aura-ext",
  "cumulus-pallet-parachain-system",
@@ -15247,7 +15247,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-cli"
-version = "32.0.0"
+version = "32.0.1"
 dependencies = [
  "clap",
  "frame-benchmarking-cli",
@@ -15273,7 +15273,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-collator-protocol"
-version = "29.1.0"
+version = "29.1.1"
 dependencies = [
  "assert_matches",
  "async-trait",
@@ -15714,7 +15714,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-node-core-prospective-parachains"
-version = "28.0.0"
+version = "28.1.0"
 dependencies = [
  "assert_matches",
  "fatality",
@@ -15930,7 +15930,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-node-network-protocol"
-version = "29.0.0"
+version = "29.0.1"
 dependencies = [
  "async-channel 1.9.0",
  "async-trait",
@@ -16034,7 +16034,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-node-subsystem-util"
-version = "29.0.0"
+version = "29.1.0"
 dependencies = [
  "assert_matches",
  "fatality",
@@ -16274,7 +16274,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-primitives-test-helpers"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bitvec",
  "parity-scale-codec",
@@ -16386,7 +16386,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-runtime-parachains"
-version = "25.0.0"
+version = "25.0.1"
 dependencies = [
  "assert_matches",
  "bitflags 1.3.2",
@@ -16990,7 +16990,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-service"
-version = "32.0.0"
+version = "32.0.1"
 dependencies = [
  "assert_matches",
  "async-trait",
@@ -17106,7 +17106,7 @@ dependencies = [
 
 [[package]]
 name = "polkadot-statement-distribution"
-version = "29.0.0"
+version = "29.0.1"
 dependencies = [
  "assert_matches",
  "async-channel 1.9.0",
@@ -20782,7 +20782,7 @@ dependencies = [
 
 [[package]]
 name = "sc-network-statement"
-version = "0.38.0"
+version = "0.38.1"
 dependencies = [
  "array-bytes 6.2.2",
  "async-channel 1.9.0",
@@ -21266,7 +21266,7 @@ dependencies = [
 
 [[package]]
 name = "sc-statement-store"
-version = "27.0.0"
+version = "27.0.1"
 dependencies = [
  "async-channel 1.9.0",
  "criterion",
@@ -28184,7 +28184,7 @@ dependencies = [
 
 [[package]]
 name = "westend-runtime"
-version = "31.0.0"
+version = "31.1.0"
 dependencies = [
  "approx",
  "binary-merkle-tree 16.1.1",
