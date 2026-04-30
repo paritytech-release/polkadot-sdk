@@ -13414,7 +13414,7 @@ dependencies = [
 
 [[package]]
 name = "pallet-revive-proc-macro"
-version = "0.7.2"
+version = "0.7.4"
 dependencies = [
  "proc-macro2 1.0.95",
  "quote 1.0.40",
