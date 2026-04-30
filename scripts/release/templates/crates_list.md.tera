@@ -1,6 +1,24 @@
 The following crates were updated to the corresponding versions:
 
-- snowbridge-verification-primitives@0.8.1
-- pallet-assets@49.0.1
-- staging-xcm-executor@25.1.0
-- pallet-mmr@46.0.1
+- frame-support@46.0.1
+- polkadot-primitives-test-helpers@0.3.1
+- pallet-conviction-voting@46.0.1
+- pallet-multi-asset-bounties@0.3.1
+- sc-network-statement@0.38.1
+- pallet-staking-async@0.11.1
+- sc-statement-store@27.0.1
+- polkadot-runtime-parachains@25.0.1
+- polkadot-node-network-protocol@29.0.1
+- westend-runtime@31.1.0
+- collectives-westend-runtime@26.1.0
+- coretime-westend-runtime@0.22.1
+- people-westend-runtime@0.22.1
+- asset-hub-westend-runtime@0.43.1
+- polkadot-node-subsystem-util@29.1.0
+- polkadot-collator-protocol@29.1.1
+- polkadot-node-core-prospective-parachains@28.1.0
+- polkadot-statement-distribution@29.0.1
+- polkadot-service@32.0.1
+- cumulus-client-consensus-aura@0.29.1
+- cumulus-relay-chain-minimal-node@0.32.1
+- polkadot-cli@32.0.1
