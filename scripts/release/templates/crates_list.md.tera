@@ -22,3 +22,4 @@ The following crates were updated to the corresponding versions:
 - cumulus-client-consensus-aura@0.29.1
 - cumulus-relay-chain-minimal-node@0.32.1
 - polkadot-cli@32.0.1
+- pallet-revive-proc-macro@0.7.4
