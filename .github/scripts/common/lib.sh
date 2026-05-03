@@ -529,7 +529,7 @@ function get_polkadot_node_version_from_code() {
 
 validate_stable_tag() {
     tag="$1"
-    pattern="^(polkadot-)?stable[0-9]{4}(-[0-9]+)?(-rc[0-9]+)?$"
+    pattern="^(polkadot-)?(un)?stable[0-9]{4}(-[0-9]+)?(-rc[0-9]+)?$"
 
     if [[ $tag =~ $pattern ]]; then
         echo $tag
@@ -545,7 +545,7 @@ validate_stable_tag() {
 # output: stableYYMM(-X) or stableYYMM(-X)-rcX
 prepare_docker_stable_tag() {
   tag="$1"
-  if [[ "$tag" =~ stable[0-9]{4}(-[0-9]+)?(-rc[0-9]+)? ]]; then
+  if [[ "$tag" =~ (un)?stable[0-9]{4}(-[0-9]+)?(-rc[0-9]+)? ]]; then
       echo "${BASH_REMATCH[0]}"
   else
       echo "Tag is invalid: $tag"

@@ -193,8 +193,15 @@ jobs:
         env:
           STABLE_BRANCH: ${{ steps.derive_branch.outputs.STABLE_BRANCH }}
         run: |
-          # Extract numeric part from stable branch name (e.g., stable2603 -> 2603)
-          VERSION_PREFIX="${STABLE_BRANCH#stable}"
+          # Extract numeric part from release base branch (e.g., stable2603 -> 2603, unstable2603 -> 2603)
+          case "$STABLE_BRANCH" in
+            stable*)   VERSION_PREFIX="${STABLE_BRANCH#stable}" ;;
+            unstable*) VERSION_PREFIX="${STABLE_BRANCH#unstable}" ;;
+            *)
+              echo "::error::Expected branch to start with 'stable' or 'unstable', got: $STABLE_BRANCH"
+              exit 1
+              ;;
+          esac
           UMBRELLA_VERSION="${VERSION_PREFIX}.0.0"
 
           echo "Setting polkadot-sdk umbrella crate version to ${UMBRELLA_VERSION}"
