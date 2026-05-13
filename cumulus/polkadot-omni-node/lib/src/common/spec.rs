@@ -306,12 +306,8 @@ pub(crate) trait BaseNodeSpec {
 			Arc::clone(&syncing_handle),
 		);
 
-		let storage_chain_block_import = StorageChainBlockImport::new(
-			inner_block_import,
-			client.clone(),
-			backend.clone(),
-			fetcher,
-		);
+		let storage_chain_block_import =
+			StorageChainBlockImport::new(inner_block_import, client.clone(), fetcher);
 
 		let block_import = ParachainBlockImport::new(storage_chain_block_import, backend.clone());
 

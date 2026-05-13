@@ -25,19 +25,14 @@ mod fetcher;
 pub(crate) use fetcher::FetchError;
 pub use fetcher::{BitswapPeerSource, IndexedTransactionFetcher, NetworkHandle, SyncingHandle};
 
-use sc_client_api::backend::{
-	Backend as BackendT, TrieCacheContext, PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY,
-};
-use sc_network::bitswap::RAW_CODEC;
-use sc_client_db::{
-	classify_indexed_extrinsics, Backend, ClassifiedExtrinsic, IndexedTransactionMeta,
-};
+use sc_client_api::{backend::PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY, BlockBackend};
+use sc_client_db::{classify_indexed_extrinsics, ClassifiedExtrinsic, IndexedTransactionMeta};
 use sc_consensus::{
 	BlockCheckParams, BlockImport, BlockImportParams, ImportResult, StateAction,
 	StorageChanges as ConsensusStorageChanges,
 };
+use sc_network::bitswap::RAW_CODEC;
 use sp_api::{ApiExt, CallApiAt, CallContext, Core, ProofRecorder, ProvideRuntimeApi};
-use sp_blockchain::Backend as BlockchainBackendT;
 use sp_consensus::{BlockOrigin, Error as ConsensusError};
 use sp_runtime::traits::{Block as BlockT, HashingFor, Header as HeaderT};
 use sp_state_machine::{IndexOperation, StorageChanges};
@@ -54,7 +49,6 @@ const LOG_TARGET: &str = "storage-chain-block-import";
 pub struct StorageChainBlockImport<Block: BlockT, Inner, Client> {
 	inner: Inner,
 	client: Arc<Client>,
-	backend: Arc<Backend<Block>>,
 	fetcher: IndexedTransactionFetcher<Block>,
 	_phantom: PhantomData<Block>,
 }
@@ -64,7 +58,6 @@ impl<Block: BlockT, Inner: Clone, Client> Clone for StorageChainBlockImport<Bloc
 		Self {
 			inner: self.inner.clone(),
 			client: self.client.clone(),
-			backend: self.backend.clone(),
 			fetcher: self.fetcher.clone(),
 			_phantom: PhantomData,
 		}
@@ -75,10 +68,9 @@ impl<Block: BlockT, Inner, Client> StorageChainBlockImport<Block, Inner, Client>
 	pub fn new(
 		inner: Inner,
 		client: Arc<Client>,
-		backend: Arc<Backend<Block>>,
 		fetcher: IndexedTransactionFetcher<Block>,
 	) -> Self {
-		Self { inner, client, backend, fetcher, _phantom: PhantomData }
+		Self { inner, client, fetcher, _phantom: PhantomData }
 	}
 }
 
@@ -87,7 +79,7 @@ impl<Block, Inner, Client> BlockImport<Block> for StorageChainBlockImport<Block,
 where
 	Block: BlockT<Hash = sc_client_db::DbHash>,
 	Inner: BlockImport<Block, Error = ConsensusError> + Send + Sync,
-	Client: ProvideRuntimeApi<Block> + CallApiAt<Block> + Send + Sync,
+	Client: ProvideRuntimeApi<Block> + CallApiAt<Block> + BlockBackend<Block> + Send + Sync,
 	Client::Api: TransactionStorageApi<Block> + Core<Block>,
 {
 	type Error = ConsensusError;
@@ -121,7 +113,7 @@ where
 impl<Block, Inner, Client> StorageChainBlockImport<Block, Inner, Client>
 where
 	Block: BlockT<Hash = sc_client_db::DbHash>,
-	Client: ProvideRuntimeApi<Block> + CallApiAt<Block> + Send + Sync,
+	Client: ProvideRuntimeApi<Block> + CallApiAt<Block> + BlockBackend<Block> + Send + Sync,
 	Client::Api: TransactionStorageApi<Block> + Core<Block>,
 {
 	/// True iff the block needs bitswap prefetch (tip-only, body present, runtime API v2+).
@@ -223,10 +215,7 @@ where
 	/// Drops every entry whose data is already in the local TRANSACTION column.
 	fn filter_missing(&self, renews: RenewHashes) -> RenewHashes {
 		let already_present = |hash: &ContentHash| {
-			self.backend
-				.blockchain()
-				.has_indexed_transaction((*hash).into())
-				.unwrap_or(false)
+			self.client.has_indexed_transaction((*hash).into()).unwrap_or(false)
 		};
 		match renews {
 			RenewHashes::Verified(set) => RenewHashes::Verified(
@@ -324,7 +313,7 @@ where
 			ConsensusError::Other(format!("execute_block: runtime_api.execute_block: {e}").into())
 		})?;
 
-		let state = self.backend.state_at(parent_hash, TrieCacheContext::Trusted).map_err(|e| {
+		let state = self.client.state_at(parent_hash).map_err(|e| {
 			ConsensusError::Other(format!("execute_block: state_at({parent_hash:?}): {e}").into())
 		})?;
 
@@ -407,7 +396,8 @@ fn body_classify_renews<Block: BlockT>(
 	infos: &[IndexedTransactionInfo],
 	body: &[Block::Extrinsic],
 ) -> HashSet<(ContentHash, HashingAlgorithm)> {
-	let db_meta: Vec<IndexedTransactionMeta> = infos.iter()
+	let db_meta: Vec<IndexedTransactionMeta> = infos
+		.iter()
 		.filter(|info| info.cid_codec == RAW_CODEC)
 		.map(|info| IndexedTransactionMeta {
 			content_hash: info.content_hash,
