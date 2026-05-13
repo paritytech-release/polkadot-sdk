@@ -16,7 +16,6 @@ pub const SYNC_TIMEOUT_SECS: u64 = 180;
 pub const LOG_TIMEOUT_SECS: u64 = 60;
 pub const LOG_ERROR_TIMEOUT_SECS: u64 = 10;
 
-pub const TEST_DATA_SIZE: usize = 2048;
 pub const NODE_LOG_CONFIG: &str = "-lsync=trace,sub-libp2p=trace,litep2p=trace,request-response=trace,transaction-storage=trace,bitswap=trace,storage-chain-block-import=debug,storage-chain-fetcher=debug,db=debug,rpc-spec-v2=debug,state=trace";
 
 pub const RELAY_CHAIN: &str = "westend-local";

@@ -18,7 +18,6 @@ use zombienet_sdk::{
 pub struct RenewOutcome {
 	pub renewed_at_block: u64,
 	pub renewed_index: u32,
-	pub content_hash: [u8; 32],
 }
 
 fn renewed_content_hash(
@@ -66,7 +65,6 @@ pub async fn wait_for_in_best_block(
 	anyhow::bail!("Transaction stream ended without InBestBlock status")
 }
 
-/// Use for LDB tests where database state must be consistent.
 pub async fn wait_for_finalized(
 	mut progress: zombienet_sdk::subxt::tx::TxProgress<
 		SubstrateConfig,
@@ -105,48 +103,45 @@ pub async fn get_alice_nonce(node: &zombienet_sdk::NetworkNode) -> Result<u64> {
 	Ok(nonce)
 }
 
-pub async fn renew_data_with_hash(
+pub async fn renew_data_with_content_hash(
 	client: &OnlineClient<SubstrateConfig>,
-	block: u64,
-	index: u32,
+	expected_hash: [u8; 32],
 	nonce: u64,
 ) -> Result<RenewOutcome> {
 	let signer = dev::bob();
 	let renew_call = tx(
 		"TransactionStorage",
-		"renew",
-		vec![Value::u128(block as u128), Value::u128(index as u128)],
+		"renew_content_hash",
+		vec![Value::from_bytes(expected_hash)],
 	);
-	log::info!("Renew (bob): nonce={}, block={}, index={}", nonce, block, index);
+	log::info!("Renew (bob, content_hash): nonce={}, hash={}", nonce, hex::encode(expected_hash));
 	let params = SubstrateExtrinsicParamsBuilder::new().nonce(nonce).immortal().build();
 
-	let (block_hash, _events) = tokio::time::timeout(Duration::from_secs(120), async {
+	let (block_hash, events) = tokio::time::timeout(Duration::from_secs(120), async {
 		let progress = client.tx().sign_and_submit_then_watch(&renew_call, &signer, params).await?;
 		wait_for_finalized(progress).await
 	})
 	.await
 	.map_err(|_| {
-		anyhow!("renew transaction timed out (block={}, index={}, nonce={})", block, index, nonce)
+		anyhow!(
+			"renew_content_hash timed out (hash={}, nonce={})",
+			hex::encode(expected_hash),
+			nonce,
+		)
 	})??;
 
-	let (renewed_index, content_hash) = renewed_content_hash(&_events)?;
+	let (renewed_index, content_hash) = renewed_content_hash(&events)?;
+	anyhow::ensure!(
+		content_hash == expected_hash,
+		"Renewed event hash mismatch: expected {}, got {}",
+		hex::encode(expected_hash),
+		hex::encode(content_hash),
+	);
 	let b = client.blocks().at(block_hash).await?;
 	log::info!(
-		"Renew included at block {} index {} (renewed entry from block {}, index {})",
+		"Renew (content_hash) included at block {} index {}",
 		b.number(),
 		renewed_index,
-		block,
-		index
 	);
-	Ok(RenewOutcome { renewed_at_block: b.number() as u64, renewed_index, content_hash })
-}
-
-#[cfg(feature = "generate-snapshots")]
-pub async fn renew_data(
-	client: &OnlineClient<SubstrateConfig>,
-	block: u64,
-	index: u32,
-	nonce: u64,
-) -> Result<u64> {
-	Ok(renew_data_with_hash(client, block, index, nonce).await?.renewed_at_block)
+	Ok(RenewOutcome { renewed_at_block: b.number() as u64, renewed_index })
 }

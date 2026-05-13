@@ -3,23 +3,23 @@
 
 //! Tip-sync-with-renewals integration test.
 //!
-//! Proves a node that warp-synced to the tip with an empty TRANSACTION column, then sees a
-//! renew block for a pre-warp entry, fetches the missing bytes via bitswap and ends up able
-//! to serve the blob via the `bitswap_v1_get` RPC.
+//! Proves a node that warp-synced to the tip with an empty TRANSACTION column,
+//! then sees a renew block for a pre-warp entry, fetches the missing bytes via
+//! bitswap and serves the blob via `bitswap_v1_get`.
 //!
-//! Reads snapshot/manifest paths from STORAGE_CHAIN_* env vars; see `utils/fixture.rs`.
+//! Reads snapshot paths from STORAGE_CHAIN_* env vars; see `utils/fixture.rs`.
 
 use super::utils::{
-	bitswap_v1_get, blake2_256,
-	build_parachain_network_config_three_relay_validators_with_snapshots, expect_dont_have,
-	expect_no_log_line, get_best_block_height, hash_to_cid, initialize_network,
-	renew_data_with_hash, renewable_entry_data, verify_parachain_binaries,
+	algorithm, bitswap_v1_get,
+	build_parachain_network_config_three_relay_validators_with_snapshots, content_hash,
+	expect_dont_have, expect_no_log_line, get_best_block_height, hash_to_cid, initialize_network,
+	payload, renew_data_with_content_hash, verify_parachain_binaries,
 	verify_warp_sync_completed, wait_for_block_height, wait_for_finalized_height,
 	wait_for_fullnode, wait_for_new_block_beyond, wait_for_relay_chain_to_sync,
-	wait_for_session_change_on_node, RenewableEntryManifest, ResolvedSnapshots,
-	BLOCK_PRODUCTION_TIMEOUT_SECS, FIXTURE_RETENTION_PERIOD, NETWORK_READY_TIMEOUT_SECS,
-	NODE_LOG_CONFIG, PARACHAIN_BINARY, PARA_ID, SNAPSHOT_STORE_INTERVAL, SYNC_TIMEOUT_SECS,
-	TIP_SYNC_RENEWABLE_STORE_COUNT, TIP_SYNC_TARGET_BLOCKS,
+	wait_for_session_change_on_node, HashingAlgorithm, ResolvedSnapshots,
+	BLOCK_PRODUCTION_TIMEOUT_SECS, FIXTURE_RETENTION_PERIOD, N_STORES,
+	NETWORK_READY_TIMEOUT_SECS, NODE_LOG_CONFIG, PARACHAIN_BINARY, PARA_ID, SYNC_TIMEOUT_SECS,
+	TIP_SYNC_TARGET_BLOCKS,
 };
 use crate::test_log;
 use anyhow::{anyhow, Context, Result};
@@ -28,18 +28,15 @@ use std::time::Duration;
 use zombienet_orchestrator::AddCollatorOptions;
 use zombienet_sdk::subxt::{config::substrate::SubstrateConfig, OnlineClient};
 
-// Test parameters
-const N_RENEW_EXERCISES: u64 = 5; // <= snapshot's RENEWABLE_STORE_COUNT (10)
+const N_RENEW_EXERCISES: u32 = N_STORES;
 const WARP_PRUNING_BLOCKS: u32 = 100;
 const SESSION_CHANGE_TIMEOUT_SECS: u64 = 300;
-const BITSWAP_RPC_POLL_TIMEOUT_SECS: u64 = 60;
+const BITSWAP_RPC_POLL_TIMEOUT_SECS: u64 = 600;
 
-fn manifest_content_hash(entry: &RenewableEntryManifest) -> Result<[u8; 32]> {
-	let mut hash = [0u8; 32];
-	hex::decode_to_slice(&entry.content_hash, &mut hash)
-		.with_context(|| format!("invalid content_hash for manifest entry {}", entry.entry))?;
-	Ok(hash)
-}
+// Sync-node block-import latency for renew blocks is dominated by per-blob
+// bitswap fetch (up to 1.5 MiB per entry) and multi-hash verification.
+// The shared SYNC_TIMEOUT_SECS (180s) is too tight; allow more headroom.
+const RENEW_BLOCK_SYNC_TIMEOUT_SECS: u64 = 600;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
@@ -48,41 +45,40 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 
 	verify_parachain_binaries()?;
 	let snaps = ResolvedSnapshots::load()?;
-	let manifest = snaps.load_manifest()?;
+	let metadata = snaps.load_metadata()?;
 	anyhow::ensure!(
-		manifest.target_blocks == TIP_SYNC_TARGET_BLOCKS,
-		"unexpected manifest target_blocks: got {}, expected {}",
-		manifest.target_blocks,
+		metadata.total_blocks == TIP_SYNC_TARGET_BLOCKS,
+		"unexpected metadata.total_blocks: got {}, expected {}",
+		metadata.total_blocks,
 		TIP_SYNC_TARGET_BLOCKS,
 	);
 	anyhow::ensure!(
-		manifest.store_interval == SNAPSHOT_STORE_INTERVAL,
-		"unexpected manifest store_interval: got {}, expected {}",
-		manifest.store_interval,
-		SNAPSHOT_STORE_INTERVAL,
-	);
-	anyhow::ensure!(
-		manifest.retention_period == FIXTURE_RETENTION_PERIOD,
-		"unexpected manifest retention_period: got {}, expected {}",
-		manifest.retention_period,
+		metadata.retention_period == FIXTURE_RETENTION_PERIOD,
+		"unexpected metadata.retention_period: got {}, expected {}",
+		metadata.retention_period,
 		FIXTURE_RETENTION_PERIOD,
 	);
 	anyhow::ensure!(
-		manifest.renewable_store_count == TIP_SYNC_RENEWABLE_STORE_COUNT,
-		"unexpected manifest renewable_store_count: got {}, expected {}",
-		manifest.renewable_store_count,
-		TIP_SYNC_RENEWABLE_STORE_COUNT,
+		metadata.n_stores == N_STORES,
+		"unexpected metadata.n_stores: got {}, expected {}",
+		metadata.n_stores,
+		N_STORES,
 	);
 	anyhow::ensure!(
-		manifest.entries.len() >= N_RENEW_EXERCISES as usize,
-		"manifest has only {} renewable entries, need {}",
-		manifest.entries.len(),
+		N_RENEW_EXERCISES <= metadata.n_stores,
+		"N_RENEW_EXERCISES ({}) must be <= metadata.n_stores ({})",
 		N_RENEW_EXERCISES,
+		metadata.n_stores,
 	);
-	let renew_targets =
-		manifest.entries.iter().take(N_RENEW_EXERCISES as usize).collect::<Vec<_>>();
-
-	test_log!(TEST, "Loaded snapshot fixtures from disk");
+	test_log!(
+		TEST,
+		"Loaded snapshot metadata: target={}, snapshot_height={}, stores={} ({}..{})",
+		metadata.total_blocks,
+		metadata.snapshot_height,
+		metadata.n_stores,
+		metadata.first_store_block,
+		metadata.last_store_block,
+	);
 
 	let config = build_parachain_network_config_three_relay_validators_with_snapshots(
 		vec!["--ipfs-server".into(), NODE_LOG_CONFIG.into()],
@@ -131,24 +127,13 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 	verify_warp_sync_completed(sync_node).await?;
 	test_log!(TEST, "Sync-node warp-synced to block {}", warp_target);
 
-	for entry in &renew_targets {
-		let data = renewable_entry_data(entry.entry);
-		let expected_hash = manifest_content_hash(entry)?;
-		anyhow::ensure!(
-			blake2_256(&data) == expected_hash,
-			"manifest hash does not match deterministic data for entry {}",
-			entry.entry,
-		);
-		let cid = hash_to_cid(&blake2_256(&data));
-		anyhow::ensure!(
-			cid == entry.cid,
-			"manifest CID does not match deterministic data for entry {}",
-			entry.entry,
-		);
+	for i in 0..N_RENEW_EXERCISES {
+		let h = content_hash(i);
+		let cid = hash_to_cid(&h, algorithm(i));
 		expect_dont_have(sync_node, &cid, Duration::from_secs(BITSWAP_RPC_POLL_TIMEOUT_SECS))
 			.await
 			.with_context(|| {
-				format!("pre-renewal: sync-node should not have entry {} ({cid})", entry.entry)
+				format!("pre-renewal: sync-node should not have entry {i} ({cid})")
 			})?;
 	}
 	test_log!(
@@ -164,67 +149,56 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 		)
 		.await?;
 
-	let mut renewed_hashes = Vec::new();
-
-	for (i, entry) in renew_targets.iter().enumerate() {
-		let expected_hash = manifest_content_hash(entry)?;
-		let outcome = renew_data_with_hash(
-			&collator_client,
-			entry.latest_renewal_block,
-			entry.latest_renewal_index,
-			bob_nonce,
-		)
-		.await
-		.with_context(|| {
-			format!(
-				"renewing manifest entry {} at block {}, index {}",
-				entry.entry, entry.latest_renewal_block, entry.latest_renewal_index,
-			)
-		})?;
-		anyhow::ensure!(
-			outcome.content_hash == expected_hash,
-			"renewed content hash mismatch for manifest entry {}",
-			entry.entry,
-		);
-		let renew_block = outcome.renewed_at_block;
+	let mut renewed: Vec<([u8; 32], HashingAlgorithm)> = Vec::new();
+	for i in 0..N_RENEW_EXERCISES {
+		let expected_hash = content_hash(i);
+		let algo = algorithm(i);
+		let outcome = renew_data_with_content_hash(&collator_client, expected_hash, bob_nonce)
+			.await
+			.with_context(|| {
+				format!("renewing entry {i} (hash={})", hex::encode(expected_hash))
+			})?;
+		bob_nonce += 1;
 		test_log!(
 			TEST,
-			"✓ Renew {}/{}: entry={}, block={}, index={} → renewed at block {} index {}",
+			"✓ Renew {}/{}: entry={}, hash={}, algo={:?} → block {} index {}",
 			i + 1,
 			N_RENEW_EXERCISES,
-			entry.entry,
-			entry.latest_renewal_block,
-			entry.latest_renewal_index,
-			renew_block,
+			i,
+			hex::encode(expected_hash),
+			algo,
+			outcome.renewed_at_block,
 			outcome.renewed_index,
 		);
-		bob_nonce += 1;
-		renewed_hashes.push(expected_hash);
-
-		wait_for_finalized_height(collator1, renew_block, BLOCK_PRODUCTION_TIMEOUT_SECS).await?;
-		wait_for_block_height(sync_node, renew_block, SYNC_TIMEOUT_SECS).await?;
+		renewed.push((expected_hash, algo));
+		wait_for_finalized_height(collator1, outcome.renewed_at_block, BLOCK_PRODUCTION_TIMEOUT_SECS)
+			.await?;
+		wait_for_block_height(sync_node, outcome.renewed_at_block, RENEW_BLOCK_SYNC_TIMEOUT_SECS)
+			.await?;
 	}
 
 	let deadline = std::time::Instant::now() + Duration::from_secs(BITSWAP_RPC_POLL_TIMEOUT_SECS);
-	let renewed_entries_available = loop {
-		let mut renewed_entries_available = 0usize;
-		for content_hash in &renewed_hashes {
-			let cid = hash_to_cid(content_hash);
-			if matches!(bitswap_v1_get(sync_node, &cid).await, Ok(Some(bytes)) if blake2_256(&bytes) == *content_hash)
-			{
-				renewed_entries_available += 1;
+	let served = loop {
+		let mut served = 0usize;
+		for (h, algo) in &renewed {
+			let cid = hash_to_cid(h, *algo);
+			if matches!(
+				bitswap_v1_get(sync_node, &cid).await,
+				Ok(Some(bytes)) if algo.hash(&bytes) == *h
+			) {
+				served += 1;
 			}
 		}
 
-		if renewed_entries_available >= N_RENEW_EXERCISES as usize {
-			break renewed_entries_available;
+		if served >= renewed.len() {
+			break served;
 		}
 
 		if std::time::Instant::now() >= deadline {
 			return Err(anyhow!(
 				"post-renewal: sync-node served only {} of {} renewed entries within {}s",
-				renewed_entries_available,
-				renewed_hashes.len(),
+				served,
+				renewed.len(),
 				BITSWAP_RPC_POLL_TIMEOUT_SECS,
 			));
 		}
@@ -234,8 +208,25 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 	test_log!(
 		TEST,
 		"✓ Sync-node serves {} renewed pre-warp entries via bitswap_v1_get",
-		renewed_entries_available,
+		served,
 	);
+
+	// Sanity-check bytes returned by bitswap actually hash to the expected hash.
+	// (Already done in the poll loop above for the algo-specific hash, but assert
+	// payload(i) decodes correctly too — guarding against the deterministic
+	// payload function drifting between generator and test.)
+	for i in 0..N_RENEW_EXERCISES {
+		let cid = hash_to_cid(&content_hash(i), algorithm(i));
+		match bitswap_v1_get(sync_node, &cid).await? {
+			Some(bytes) => {
+				anyhow::ensure!(
+					bytes == payload(i),
+					"bitswap returned bytes do not match payload({i})",
+				);
+			},
+			None => anyhow::bail!("bitswap_v1_get returned None for entry {i} after successful poll loop"),
+		}
+	}
 
 	expect_no_log_line(
 		collator1,

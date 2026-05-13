@@ -1,9 +1,10 @@
 // Copyright (C) Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Shared storage-chain snapshot fixture layout and manifest helpers.
+//! Snapshot layout and deterministic payload functions shared by the
+//! generator and the tip-sync test.
 
-use super::{generate_test_data, ParachainSnapshots, TEST_DATA_SIZE};
+use super::{HashingAlgorithm, ParachainSnapshots};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "generate-snapshots")]
@@ -11,47 +12,40 @@ use std::path::Path;
 use std::path::PathBuf;
 
 pub const FIXTURE_RETENTION_PERIOD: u32 = 200;
-pub const SNAPSHOT_STORE_INTERVAL: u64 = 10;
-pub const TIP_SYNC_TARGET_BLOCKS: u64 = 300;
-pub const TIP_SYNC_RENEWABLE_STORE_COUNT: u64 = 10;
+pub const TIP_SYNC_TARGET_BLOCKS: u64 = 100;
+pub const N_STORES: u32 = 30;
+
+pub const PAYLOAD_SIZE_MIN: usize = 512 * 1024;
+pub const PAYLOAD_SIZE_MAX: usize = 1536 * 1024;
 
 #[cfg(feature = "generate-snapshots")]
-pub const ARCHIVE_MANIFEST_FILE: &str = "archive-manifest.json";
+pub const SNAPSHOT_METADATA_FILE: &str = "snapshot-metadata.json";
 
 pub const TIP_SYNC_SNAPSHOT_ENV: &str = "STORAGE_CHAIN_TIP_SYNC_SNAPSHOT";
 pub const RELAY_SNAPSHOT_ENV: &str = "STORAGE_CHAIN_RELAY_SNAPSHOT";
 pub const RAW_CHAIN_SPEC_ENV: &str = "STORAGE_CHAIN_RAW_CHAIN_SPEC";
 pub const RAW_RELAY_CHAIN_SPEC_ENV: &str = "STORAGE_CHAIN_RAW_RELAY_CHAIN_SPEC";
-pub const TIP_SYNC_MANIFEST_ENV: &str = "STORAGE_CHAIN_TIP_SYNC_MANIFEST";
+pub const TIP_SYNC_METADATA_ENV: &str = "STORAGE_CHAIN_TIP_SYNC_METADATA";
 
-/// Default GCS URLs for the storage-chain test fixtures.
 const DEFAULT_TIP_SYNC_SNAPSHOT: &str =
-	"https://storage.googleapis.com/fake-storage-chain-fixtures/tip-sync-300.tgz";
+	"https://storage.googleapis.com/fake-storage-chain-fixtures/tip-sync-100.tgz";
 const DEFAULT_RELAY_SNAPSHOT: &str =
 	"https://storage.googleapis.com/fake-storage-chain-fixtures/relay.tgz";
-const DEFAULT_TIP_SYNC_MANIFEST: &str =
-	"https://storage.googleapis.com/fake-storage-chain-fixtures/tip-sync-300-manifest.json";
+const DEFAULT_TIP_SYNC_METADATA: &str =
+	"https://storage.googleapis.com/fake-storage-chain-fixtures/tip-sync-100-metadata.json";
 
 const SNAPSHOT_DIR: &str = "tests/zombie_ci/storage_chain/fixtures/test-databases";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotManifest {
-	pub target_blocks: u64,
-	pub store_interval: u64,
+pub struct SnapshotMetadata {
+	pub total_blocks: u64,
 	pub retention_period: u32,
-	pub renewable_store_count: u64,
-	pub entries: Vec<RenewableEntryManifest>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RenewableEntryManifest {
-	pub entry: u64,
-	pub original_store_target_block: u64,
-	pub original_block: u64,
-	pub latest_renewal_block: u64,
-	pub latest_renewal_index: u32,
-	pub content_hash: String,
-	pub cid: String,
+	pub n_stores: u32,
+	pub payload_size_min: usize,
+	pub payload_size_max: usize,
+	pub snapshot_height: u64,
+	pub first_store_block: u64,
+	pub last_store_block: u64,
 }
 
 pub struct ResolvedSnapshots {
@@ -59,7 +53,7 @@ pub struct ResolvedSnapshots {
 	pub relay: PathBuf,
 	pub chain_spec: PathBuf,
 	pub relay_chain_spec: PathBuf,
-	pub manifest: PathBuf,
+	pub metadata: PathBuf,
 }
 
 impl ResolvedSnapshots {
@@ -70,10 +64,10 @@ impl ResolvedSnapshots {
 		let chain_spec = fixture_from_env_or_local(RAW_CHAIN_SPEC_ENV, raw_chain_spec_path())?;
 		let relay_chain_spec =
 			fixture_from_env_or_local(RAW_RELAY_CHAIN_SPEC_ENV, raw_relay_chain_spec_path())?;
-		let manifest =
-			fixture_from_env_or_default(TIP_SYNC_MANIFEST_ENV, DEFAULT_TIP_SYNC_MANIFEST);
+		let metadata =
+			fixture_from_env_or_default(TIP_SYNC_METADATA_ENV, DEFAULT_TIP_SYNC_METADATA);
 
-		Ok(Self { collator, relay, chain_spec, relay_chain_spec, manifest })
+		Ok(Self { collator, relay, chain_spec, relay_chain_spec, metadata })
 	}
 
 	pub fn as_parachain_snapshots(&self) -> ParachainSnapshots<'_> {
@@ -85,17 +79,17 @@ impl ResolvedSnapshots {
 		}
 	}
 
-	pub fn load_manifest(&self) -> Result<SnapshotManifest> {
-		let file = std::fs::File::open(&self.manifest)
-			.with_context(|| format!("Failed to open {}", self.manifest.display()))?;
+	pub fn load_metadata(&self) -> Result<SnapshotMetadata> {
+		let file = std::fs::File::open(&self.metadata)
+			.with_context(|| format!("Failed to open {}", self.metadata.display()))?;
 		serde_json::from_reader(file)
-			.with_context(|| format!("Failed to decode {}", self.manifest.display()))
+			.with_context(|| format!("Failed to decode {}", self.metadata.display()))
 	}
 }
 
 #[cfg(feature = "generate-snapshots")]
-pub fn archive_manifest_path(output_dir: &Path) -> PathBuf {
-	output_dir.join(ARCHIVE_MANIFEST_FILE)
+pub fn snapshot_metadata_path(output_dir: &Path) -> PathBuf {
+	output_dir.join(SNAPSHOT_METADATA_FILE)
 }
 
 pub fn fixture_snapshot_dir() -> PathBuf {
@@ -125,12 +119,95 @@ fn fixture_from_env_or_local(env_var: &str, local_path: PathBuf) -> Result<PathB
 	}
 }
 
-pub fn test_data_for_store_target_block(block: u64) -> Vec<u8> {
-	let pattern = format!("PARA_GENDB_{block:04}_");
-	generate_test_data(TEST_DATA_SIZE, pattern.as_bytes())
+// Only Blake2b-256 is currently exercised end-to-end. Two pre-existing substrate
+// limitations gate the other algorithms:
+//   * Keccak256: the `bitswap_v1_get` RPC rejects Keccak CIDs per spec (only
+//     sha2-256 and blake2b-256 are permitted).
+//   * Sha2_256: the litep2p Bitswap response routing fails to match Sha2 CIDs
+//     in the requester's pending-batch map, causing `request_bitswap_blocks_unverified`
+//     to time out. The wrapper's collator-side responder DOES send Sha2 responses;
+//     the requester just never sees them. Reproduces with even one Sha2 entry.
+// Multi-hash verification on the block-import path itself still covers all three
+// algorithms (see `cumulus-client-storage-chain-sync` integration tests).
+pub fn algorithm(_i: u32) -> HashingAlgorithm {
+	HashingAlgorithm::Blake2b256
 }
 
-pub fn renewable_entry_data(entry: u64) -> Vec<u8> {
-	let original_store_target_block = (entry + 1) * SNAPSHOT_STORE_INTERVAL;
-	test_data_for_store_target_block(original_store_target_block)
+/// Deterministic payload of size in `[PAYLOAD_SIZE_MIN, PAYLOAD_SIZE_MAX]`.
+pub fn payload(i: u32) -> Vec<u8> {
+	let span = (PAYLOAD_SIZE_MAX - PAYLOAD_SIZE_MIN + 1) as u32;
+	let size = PAYLOAD_SIZE_MIN + (xorshift32_seeded(i.wrapping_add(0xA53C7B91)) % span) as usize;
+
+	let mut state = i.wrapping_add(0x9E3779B9);
+	let mut data = Vec::with_capacity(size);
+	while data.len() < size {
+		state = xorshift32(state);
+		let remaining = size - data.len();
+		if remaining >= 4 {
+			data.extend_from_slice(&state.to_le_bytes());
+		} else {
+			data.extend_from_slice(&state.to_le_bytes()[..remaining]);
+		}
+	}
+	data
+}
+
+pub fn content_hash(i: u32) -> [u8; 32] {
+	algorithm(i).hash(&payload(i))
+}
+
+fn xorshift32(mut x: u32) -> u32 {
+	x ^= x << 13;
+	x ^= x >> 17;
+	x ^= x << 5;
+	x
+}
+
+fn xorshift32_seeded(seed: u32) -> u32 {
+	// xorshift collapses to zero if its state is zero
+	let s = if seed == 0 { 1 } else { seed };
+	xorshift32(s)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn payload_is_deterministic_per_index() {
+		for i in 0..50u32 {
+			assert_eq!(payload(i), payload(i), "payload({i}) not deterministic");
+		}
+	}
+
+	#[test]
+	fn payload_sizes_within_bounds() {
+		for i in 0..200u32 {
+			let len = payload(i).len();
+			assert!(
+				(PAYLOAD_SIZE_MIN..=PAYLOAD_SIZE_MAX).contains(&len),
+				"payload({i}).len()={} out of bounds [{}, {}]",
+				len,
+				PAYLOAD_SIZE_MIN,
+				PAYLOAD_SIZE_MAX,
+			);
+		}
+	}
+
+	#[test]
+	fn content_hashes_are_unique_for_first_n_stores() {
+		use std::collections::HashSet;
+		let mut seen = HashSet::new();
+		for i in 0..N_STORES {
+			let h = content_hash(i);
+			assert!(seen.insert(h), "duplicate content hash at i={i}");
+		}
+	}
+
+	#[test]
+	fn algorithm_is_blake_only() {
+		for i in 0..10u32 {
+			assert_eq!(algorithm(i), HashingAlgorithm::Blake2b256);
+		}
+	}
 }
