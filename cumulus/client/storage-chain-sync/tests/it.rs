@@ -39,7 +39,7 @@ use sp_core::H256;
 use sp_runtime::{generic, traits::BlakeTwo256, traits::Header as _, Digest, OpaqueExtrinsic};
 use sp_state_machine::{IndexOperation, StorageChanges};
 use sp_transaction_storage_proof::{
-	runtime_api::TransactionStorageApi, ContentHash, HashingAlgorithm, IndexedTransactionInfo,
+	runtime_api::TransactionStorageApi, ContentHash, IndexedTransactionInfo,
 };
 use std::{
 	collections::HashMap,
@@ -67,6 +67,7 @@ impl Default for MockApiClient {
 }
 
 impl MockApiClient {
+	#[allow(dead_code)] // Used by upcoming gap-sync tests (v13 plan PR-2).
 	fn set_indexed(&self, block_number: u32, infos: Vec<IndexedTransactionInfo>) {
 		self.inner.lock().unwrap().indexed_at_block_number.insert(block_number, infos);
 	}
@@ -275,7 +276,6 @@ impl BitswapPeerSource for MockBitswapPeerSource {
 
 struct Harness {
 	wrapper: StorageChainBlockImport<TestBlock, TestInner, MockApiClient>,
-	api: Arc<MockApiClient>,
 	backend: Arc<Backend<TestBlock>>,
 	captured: Arc<Mutex<Vec<BlockImportParams<TestBlock>>>>,
 	network: Arc<MockNetworkRequest>,
@@ -306,7 +306,7 @@ fn make_harness(mode: HarnessMode) -> Harness {
 	let fetcher = IndexedTransactionFetcher::<TestBlock>::new(network_handle, syncing_handle);
 	let wrapper = StorageChainBlockImport::new(inner, api.clone(), backend.clone(), fetcher);
 
-	Harness { wrapper, api, backend, captured, network }
+	Harness { wrapper, backend, captured, network }
 }
 
 fn test_header(number: u32, parent: H256) -> TestHeader {
@@ -340,16 +340,6 @@ fn case_a_params(number: u32, renews: Vec<IndexOperation>) -> BlockImportParams<
 	changes.transaction_index_changes = renews;
 	params.state_action = StateAction::ApplyChanges(ConsensusStorageChanges::Changes(changes));
 	params
-}
-
-fn indexed_info_blake2b(content_hash: ContentHash, size: u32) -> IndexedTransactionInfo {
-	IndexedTransactionInfo {
-		content_hash,
-		size,
-		hashing: HashingAlgorithm::Blake2b256,
-		cid_codec: RAW_CODEC,
-		extrinsic_index: 0,
-	}
 }
 
 
@@ -451,8 +441,8 @@ async fn import_case_a_no_renews_attaches_nothing() {
 #[tokio::test]
 async fn import_case_a_attaches_prefetched() {
 	let h = make_harness(HarnessMode::Record);
-	let content_hash: ContentHash = [0x11u8; 32];
 	let bytes = b"renew-blob-payload".to_vec();
+	let content_hash: ContentHash = sp_crypto_hashing::blake2_256(&bytes);
 	h.network.insert(content_hash, bytes.clone());
 
 	let params = case_a_params(1, vec![renew_op(content_hash, 0)]);
@@ -519,36 +509,30 @@ fn install_log_capture() -> (sp_tracing::test_log_capture::LogCapture, tracing::
 
 
 #[tokio::test]
-async fn import_verify_post_commit_warns_when_runtime_undeclares_hash() {
-	let (capture, _guard) = install_log_capture();
-	let h = make_harness(HarnessMode::Commit);
-	let content_hash: ContentHash = [0x44u8; 32];
-	let bytes = sp_crypto_hashing::blake2_256(b"verify-warns-bytes").to_vec();
-	h.network.insert(content_hash, bytes.clone());
-	let params = case_a_params(1, vec![renew_op(content_hash, 0)]);
-	let result = h.wrapper.import_block(params).await.expect("import_block");
-	assert!(matches!(result, ImportResult::Imported(_)));
-	assert!(
-		capture.contains("not declared by runtime"),
-		"missing warn line, logs:\n{}",
-		capture.get_logs(),
-	);
-}
-
-#[tokio::test]
-async fn import_verify_post_commit_errors_when_hash_mismatches() {
+async fn import_rejects_blob_failing_multihash_verify() {
 	let (capture, _guard) = install_log_capture();
 	let h = make_harness(HarnessMode::Commit);
 	let content_hash: ContentHash = [0x55u8; 32];
-	let wrong_bytes = b"these-bytes-do-not-hash-to-content_hash".to_vec();
-	h.network.insert(content_hash, wrong_bytes.clone());
-	h.api.set_indexed(1, vec![indexed_info_blake2b(content_hash, wrong_bytes.len() as u32)]);
+	let bad_bytes = b"these-bytes-do-not-hash-to-content_hash".to_vec();
+	h.network.insert(content_hash, bad_bytes.clone());
 	let params = case_a_params(1, vec![renew_op(content_hash, 0)]);
-	let result = h.wrapper.import_block(params).await.expect("import_block");
-	assert!(matches!(result, ImportResult::Imported(_)));
+	let err = h
+		.wrapper
+		.import_block(params)
+		.await
+		.expect_err("fetch should fail when blob fails multi-hash verify");
+	let msg = format!("{err}");
 	assert!(
-		capture.contains("post-commit verify FAILED"),
-		"missing error line, logs:\n{}",
+		msg.contains("bitswap fetch"),
+		"unexpected error message: {msg}",
+	);
+	assert!(
+		capture.contains("did not match any supported hashing algorithm"),
+		"missing warn line, logs:\n{}",
 		capture.get_logs(),
+	);
+	assert!(
+		!capture.contains("post-commit verify FAILED"),
+		"should not contain post-commit verify message",
 	);
 }

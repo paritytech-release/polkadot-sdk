@@ -109,17 +109,10 @@ where
 
 		let renews = self.classify_renew_hashes(&mut params)?;
 		let missing = self.filter_missing(renews);
-		let FetchedRenews { payload, unverified_hashes } = self.fetch_all(missing).await?;
+		let FetchedRenews { payload } = self.fetch_all(missing).await?;
 		Self::attach_prefetched(&mut params, payload);
 
-		let block_hash = params.post_hash();
-		let block_number = *params.header.number();
-
 		let result = self.inner.import_block(params).await?;
-
-		if matches!(result, ImportResult::Imported(_)) && !unverified_hashes.is_empty() {
-			self.verify_post_commit(block_hash, block_number, &unverified_hashes);
-		}
 
 		Ok(result)
 	}
@@ -252,17 +245,17 @@ where
 			return Ok(FetchedRenews::default());
 		}
 
-		let (wanted_hashes, acquired, unverified_hashes) = match missing {
+		let (wanted_hashes, acquired) = match missing {
 			RenewHashes::Verified(set) => {
 				let wants: Vec<(ContentHash, HashingAlgorithm)> = set.into_iter().collect();
 				let acquired = self.fetcher.fetch_many(&wants).await?;
 				let hashes: Vec<ContentHash> = wants.into_iter().map(|(h, _)| h).collect();
-				(hashes, acquired, Vec::new())
+				(hashes, acquired)
 			},
 			RenewHashes::Unverified(set) => {
 				let wants: Vec<ContentHash> = set.into_iter().collect();
 				let acquired = self.fetcher.fetch_many_unverified(&wants).await?;
-				(wants.clone(), acquired, wants)
+				(wants, acquired)
 			},
 		};
 
@@ -288,7 +281,7 @@ where
 			})
 			.collect();
 
-		Ok(FetchedRenews { payload, unverified_hashes })
+		Ok(FetchedRenews { payload })
 	}
 
 	/// Stash prefetched bytes in `params.intermediates` under
@@ -353,75 +346,13 @@ where
 
 		Ok(gen_storage_changes)
 	}
-
-	/// Cross-check unverified-path fetches against runtime metadata after commit.
-	/// Logs warnings/errors but never propagates failures.
-	fn verify_post_commit(
-		&self,
-		block_hash: Block::Hash,
-		block_number: <<Block as BlockT>::Header as HeaderT>::Number,
-		unverified_hashes: &[ContentHash],
-	) {
-		if unverified_hashes.is_empty() {
-			return;
-		}
-
-		let infos = match self.client.runtime_api().indexed_transactions(block_hash, block_number) {
-			Ok(infos) => infos,
-			Err(e) => {
-				log::warn!(
-					target: LOG_TARGET,
-					"post-commit verify: runtime API indexed_transactions failed for block #{block_number:?} ({block_hash:?}): {e}",
-				);
-				return;
-			},
-		};
-
-		let lookup: std::collections::HashMap<ContentHash, &IndexedTransactionInfo> =
-			infos.iter().map(|info| (info.content_hash, info)).collect();
-
-		for &content_hash in unverified_hashes {
-			let Some(info) = lookup.get(&content_hash) else {
-				log::warn!(
-					target: LOG_TARGET,
-					"post-commit verify: fetched {content_hash:?} not declared by runtime at block #{block_number:?}",
-				);
-				continue;
-			};
-
-			let bytes = match self.backend.blockchain().indexed_transaction(content_hash.into()) {
-				Ok(Some(b)) => b,
-				Ok(None) => {
-					log::warn!(target: LOG_TARGET, "post-commit verify: no bytes for {content_hash:?} at block #{block_number:?}");
-					continue;
-				},
-				Err(e) => {
-					log::warn!(target: LOG_TARGET, "post-commit verify: backend lookup failed for {content_hash:?}: {e}");
-					continue;
-				},
-			};
-
-			let observed = info.hashing.hash(&bytes);
-			if observed != info.content_hash {
-				log::error!(
-					target: LOG_TARGET,
-					"post-commit verify FAILED at block #{block_number:?}: \
-					 declared_algo={:?}, expected_content_hash={:?}, observed={:?} \
-					 (peer returned bytes that don't hash to the runtime-declared content_hash)",
-					info.hashing,
-					info.content_hash,
-					observed,
-				);
-			}
-		}
-	}
 }
 
 /// Renew hashes tagged by their discovery path.
 ///
 /// `Verified` pairs include the hashing algorithm (sourced from the runtime API); bitswap
-/// can verify integrity. `Unverified` are bare hashes from host calls; the caller must
-/// run [`StorageChainBlockImport::verify_post_commit`] after the inner import.
+/// can verify integrity. `Unverified` are bare hashes from host calls; each blob is verified
+/// at fetch time by hashing with every supported [`HashingAlgorithm`].
 enum RenewHashes {
 	Verified(HashSet<(ContentHash, HashingAlgorithm)>),
 	Unverified(HashSet<ContentHash>),
@@ -436,12 +367,10 @@ impl RenewHashes {
 	}
 }
 
-/// Result of [`StorageChainBlockImport::fetch_all`]: payload bytes plus the subset of
-/// fetched hashes that need post-commit verification.
+/// Result of [`StorageChainBlockImport::fetch_all`]: the fetched payload bytes.
 #[derive(Default)]
 struct FetchedRenews {
 	payload: Vec<(ContentHash, Vec<u8>)>,
-	unverified_hashes: Vec<ContentHash>,
 }
 
 /// Pull `Renew` content-hashes from a host-call index-ops log. `Insert` ops are ignored:

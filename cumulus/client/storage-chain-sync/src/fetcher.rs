@@ -158,8 +158,9 @@ impl<Block: BlockT> IndexedTransactionFetcher<Block> {
 	/// per hash. This is for renews discovered via `IndexOperation::Renew { hash, .. }`
 	/// host-call output, which carries only the 32-byte content hash. The substrate bitswap
 	/// server is algorithm-agnostic (looks up by 32-byte digest only) so the request succeeds
-	/// regardless of the real hashing algorithm; the caller must verify integrity by other means
-	/// (post-commit runtime-API cross-check).
+	/// regardless of the real hashing algorithm. Each returned blob is hashed locally with every
+	/// supported [`HashingAlgorithm`] and accepted iff one matches the requested digest;
+	/// mismatching blobs are dropped so the surrounding peer-rotation loop retries the next peer.
 	///
 	/// Sends one WANT-BLOCK per hash per peer. Returns only successfully fetched entries.
 	pub async fn fetch_many_unverified(
@@ -292,13 +293,26 @@ async fn try_fetch_from_peer_unverified<N: NetworkRequest + ?Sized>(
 			Some(Ok(per_cid)) =>
 				for (hash, cid) in chunk {
 					if let Some(FetchOutcome::Block(data)) = per_cid.get(cid) {
-						log::debug!(
-							target: LOG_TARGET,
-							"fetched {} unverified bytes for {:?} from {peer:?}",
-							data.len(),
-							hash,
-						);
-						acquired.insert(*hash, data.clone());
+						match verify_blob(hash, data) {
+							Some(algo) => {
+								log::debug!(
+									target: LOG_TARGET,
+									"fetched {} bytes for {:?} from {peer:?} (verified as {algo:?})",
+									data.len(),
+									hash,
+								);
+								acquired.insert(*hash, data.clone());
+							},
+							None => {
+								log::warn!(
+									target: LOG_TARGET,
+									"discarding {} bytes from {peer:?} for {:?}: \
+									 did not match any supported hashing algorithm; will retry next peer",
+									data.len(),
+									hash,
+								);
+							},
+						}
 					}
 				},
 		}
@@ -311,6 +325,21 @@ fn cid_for(hash: ContentHash, algo: HashingAlgorithm) -> Result<Cid, FetchError>
 	let mh = Multihash::<64>::wrap(algo.multihash_code(), &hash)
 		.map_err(|e| FetchError::Multihash(e.to_string()))?;
 	Ok(Cid::new_v1(RAW_CODEC, mh))
+}
+
+/// Returns the [`HashingAlgorithm`] that hashes `data` to `expected`, if any of the three
+/// supported algorithms matches.
+fn verify_blob(expected: &ContentHash, data: &[u8]) -> Option<HashingAlgorithm> {
+	for algo in [
+		HashingAlgorithm::Blake2b256,
+		HashingAlgorithm::Sha2_256,
+		HashingAlgorithm::Keccak256,
+	] {
+		if &algo.hash(data) == expected {
+			return Some(algo);
+		}
+	}
+	None
 }
 
 async fn with_timeout<F, T>(fut: F, timeout: Duration) -> Option<T>
