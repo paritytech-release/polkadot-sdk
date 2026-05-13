@@ -2252,13 +2252,13 @@ fn apply_state_commit(
 /// and does not scan the body for entries with unknown positions.
 #[derive(Clone, Debug)]
 pub struct IndexedTransactionMeta {
-	/// Content hash of the indexed data blob.
+	/// Hash of the indexed bytes, as produced by `hashing`.
 	pub content_hash: [u8; 32],
-	/// Size of the indexed data blob in bytes.
+	/// Byte length of the indexed bytes.
 	pub size: u32,
-	/// Extrinsic index that produced this entry.
+	/// Concrete body position that produced this entry.
 	pub extrinsic_index: u32,
-	/// Algorithm used to compute `content_hash`.
+	/// Hash algorithm used to produce `content_hash`.
 	pub hashing: HashingAlgorithm,
 }
 
@@ -2364,28 +2364,26 @@ fn apply_index_ops<Block: BlockT>(
 	extrinsic_index.encode()
 }
 
-/// Outcome of [`classify_indexed_extrinsics`] for a single body position.
+/// Classification of one body extrinsic against the indexed-transaction metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClassifiedExtrinsic {
-	/// Body extrinsic carries the indexed data as its tail bytes; can be stored locally.
+	/// Extrinsic carries an indexed-data payload that the backend should store on import.
 	Insert {
-		/// Content hash of the indexed data.
+		/// Content hash of the indexed payload.
 		hash: [u8; 32],
 		/// Length of the extrinsic header (everything before the indexed tail).
 		header_len: usize,
-		/// Indexed data tail.
+		/// Indexed payload bytes (last `size` bytes of the encoded extrinsic).
 		tail: Vec<u8>,
-		/// Algorithm declared by the runtime for this entry.
+		/// Hash algorithm used to produce `hash`.
 		hashing: HashingAlgorithm,
 	},
-	/// One or more indexed entries whose data is not carried in the body — each must be
-	/// bitswap-fetched separately. A multi-element `hashes` Vec corresponds to a
-	/// `process_auto_renewals`-style multi-renew extrinsic.
+	/// Extrinsic renews one or more previously-indexed entries by hash.
 	Renew {
-		/// Renew targets, in submission order. Always non-empty.
+		/// Content hashes being renewed, with their hash algorithm.
 		hashes: Vec<([u8; 32], HashingAlgorithm)>,
 	},
-	/// Body extrinsic with no associated indexed entry.
+	/// Extrinsic carries no indexed data.
 	Full,
 }
 
