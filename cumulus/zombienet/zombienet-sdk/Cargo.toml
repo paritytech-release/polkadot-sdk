@@ -45,6 +45,15 @@ subxt = { workspace = true, features = ["reconnecting-rpc-client"] }
 statement-store-subxt = { package = "subxt", version = "0.50" }
 statement-store-subxt-signer = { package = "subxt-signer", version = "0.50", features = ["sr25519"] }
 
+blake2 = { workspace = true, default-features = true }
+cid = { workspace = true }
+flate2 = { workspace = true }
+hex = { workspace = true, default-features = true }
+multihash = { workspace = true, default-features = true }
+tar = { workspace = true }
+thiserror = { workspace = true }
+twox-hash = { workspace = true, default-features = true }
+
 [features]
 zombie-ci = []
 generate-snapshots = []
