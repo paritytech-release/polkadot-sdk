@@ -3,47 +3,11 @@
 
 //! Tip-sync-with-renewals integration test.
 //!
-//! # What this proves
+//! Proves a node that warp-synced to the tip with an empty TRANSACTION column, then sees a
+//! renew block for a pre-warp entry, fetches the missing bytes via bitswap and ends up able
+//! to serve the blob via the `bitswap_v1_get` RPC.
 //!
-//! 1. A node that warp-syncs to the tip starts with an EMPTY TRANSACTION column — none of the
-//!    indexed-transaction blobs from before the warp target are on disk.
-//! 2. When the collator submits a `transaction_storage::renew(block, index)` for a pre-warp entry,
-//!    the renew block reaches the syncing node via tip sync. The block body references a
-//!    `content_hash` the syncing node does not have. [`StorageChainBlockImport`] detects this,
-//!    issues a bitswap `WANT-BLOCK`, receives the bytes from the collator, and writes them to the
-//!    TRANSACTION column atomically with the block's BODY_INDEX entry.
-//! 3. After the renew is finalized, the syncing node's `bitswap_v1_get` RPC returns the original
-//!    blob — direct evidence the wrapper's fetch path ran AND the bytes landed in the TRANSACTION
-//!    column.
-//!
-//! # Snapshot fixtures required
-//!
-//! This test loads a 300-block parachain snapshot and manifest produced by
-//! `parachain_generate_db.rs`. CI will use GCS fixture URLs; until those buckets exist,
-//! local runs should point the fixture env vars at generated files:
-//!
-//! ```bash
-//! TARGET_BLOCKS=300 \
-//! DB_OUTPUT_DIR=cumulus/zombienet/zombienet-sdk/tests/zombie_ci/storage_chain/fixtures/test-databases \
-//! ZOMBIE_PROVIDER=native \
-//!   cargo test --release -p cumulus-zombienet-sdk-tests \
-//!     --features "zombie-ci generate-snapshots" \
-//!     -- parachain_generate_databases --nocapture
-//!
-//! STORAGE_CHAIN_TIP_SYNC_SNAPSHOT=.../tip-sync-300.tgz \
-//! STORAGE_CHAIN_RELAY_SNAPSHOT=.../relay.tgz \
-//! STORAGE_CHAIN_TIP_SYNC_MANIFEST=.../tip-sync-300-manifest.json \
-//! ZOMBIE_PROVIDER=native \
-//!   cargo test --release -p cumulus-zombienet-sdk-tests \
-//!     --features zombie-ci \
-//!     -- parachain_tip_sync_with_renewals_test --nocapture
-//! ```
-//!
-//! # Why the renew target comes from the manifest
-//!
-//! The stored blob identity is deterministic, but the exact block/index of the
-//! latest generated renewal is captured from chain events while building the
-//! snapshot. The test consumes that manifest directly instead of probing blocks.
+//! Reads snapshot/manifest paths from STORAGE_CHAIN_* env vars; see `utils/fixture.rs`.
 
 use super::utils::{
 	bitswap_v1_get, blake2_256,
@@ -120,9 +84,6 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 
 	test_log!(TEST, "Loaded snapshot fixtures from disk");
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Phase 1: collator boots from 300-block snapshot, chain advances past it.
-	// ─────────────────────────────────────────────────────────────────────────
 	let config = build_parachain_network_config_three_relay_validators_with_snapshots(
 		vec!["--ipfs-server".into(), NODE_LOG_CONFIG.into()],
 		Some(snaps.as_parachain_snapshots()),
@@ -142,9 +103,6 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 		test_log!(TEST, "Collator extended chain past snapshot tip");
 	}
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Phase 2: warp-sync a fresh node.
-	// ─────────────────────────────────────────────────────────────────────────
 	network
 		.add_collator(
 			"sync-node",
@@ -173,9 +131,6 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 	verify_warp_sync_completed(sync_node).await?;
 	test_log!(TEST, "Sync-node warp-synced to block {}", warp_target);
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Phase 3: sanity — sync-node has NO pre-warp snapshot data.
-	// ─────────────────────────────────────────────────────────────────────────
 	for entry in &renew_targets {
 		let data = renewable_entry_data(entry.entry);
 		let expected_hash = manifest_content_hash(entry)?;
@@ -201,14 +156,6 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 		"Confirmed sync-node lacks all {N_RENEW_EXERCISES} pre-warp entries (DontHave)"
 	);
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Phase 4: continuous renewals — the core of the test.
-	//
-	// `pallet_transaction_storage::renew(block, index)` requires the entry to
-	// still exist at (block, index). The snapshot generator records the latest
-	// valid renewal targets in the fixture manifest, so the test renews those
-	// targets directly instead of probing historical blocks.
-	// ─────────────────────────────────────────────────────────────────────────
 	let collator_client: OnlineClient<SubstrateConfig> = collator1.wait_client().await?;
 	let mut bob_nonce = collator_client
 		.tx()
@@ -290,9 +237,6 @@ async fn parachain_tip_sync_with_renewals_test() -> Result<()> {
 		renewed_entries_available,
 	);
 
-	// ─────────────────────────────────────────────────────────────────────────
-	// Phase 5: negative log assertions — no hash mismatches anywhere.
-	// ─────────────────────────────────────────────────────────────────────────
 	expect_no_log_line(
 		collator1,
 		"(?i)bitswap.*hash.mismatch",

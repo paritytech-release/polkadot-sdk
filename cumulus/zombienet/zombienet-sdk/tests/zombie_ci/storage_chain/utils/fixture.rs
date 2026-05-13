@@ -24,9 +24,7 @@ pub const RAW_CHAIN_SPEC_ENV: &str = "STORAGE_CHAIN_RAW_CHAIN_SPEC";
 pub const RAW_RELAY_CHAIN_SPEC_ENV: &str = "STORAGE_CHAIN_RAW_RELAY_CHAIN_SPEC";
 pub const TIP_SYNC_MANIFEST_ENV: &str = "STORAGE_CHAIN_TIP_SYNC_MANIFEST";
 
-// Placeholder URLs until the storage-chain fixture bucket exists. Local runs should set the
-// matching snapshot/manifest overrides above to point at freshly generated fixtures. Chain specs
-// are checked into this repository and intentionally do not use GCS defaults.
+/// Default GCS URLs for the storage-chain test fixtures.
 const DEFAULT_TIP_SYNC_SNAPSHOT: &str =
 	"https://storage.googleapis.com/fake-storage-chain-fixtures/tip-sync-300.tgz";
 const DEFAULT_RELAY_SNAPSHOT: &str =

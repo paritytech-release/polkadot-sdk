@@ -5807,7 +5807,6 @@ name = "cumulus-zombienet-sdk-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "blake2 0.10.6",
  "cid 0.11.1",
  "cumulus-primitives-core",
  "cumulus-test-runtime",
@@ -5833,6 +5832,7 @@ dependencies = [
  "sp-consensus-aura",
  "sp-consensus-slots",
  "sp-core 28.0.0",
+ "sp-crypto-hashing 0.1.0",
  "sp-keyring",
  "sp-maybe-compressed-blob 11.0.0",
  "sp-rpc",

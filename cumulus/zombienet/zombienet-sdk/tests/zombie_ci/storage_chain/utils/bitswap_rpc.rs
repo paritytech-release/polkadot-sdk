@@ -1,20 +1,8 @@
 // Copyright (C) Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Thin RPC helper for the `bitswap_v1_get` JSON-RPC method exposed by every
-//! substrate node. Replaces the litep2p-based custom bitswap client; tests
-//! should use this module instead of speaking the bitswap wire protocol from
-//! outside.
-//!
-//! # Semantics
-//!
-//! | State                                          | Return                          |
-//! |------------------------------------------------|---------------------------------|
-//! | data present in TRANSACTION column             | `Ok(Some(bytes))`               |
-//! | data absent, node idle                         | `Ok(None)`                      |
-//! | node is major-syncing (retry is meaningful)    | `Err(BitswapRpcError::MajorSyncing)` |
-//! | RPC transport error                            | `Err(BitswapRpcError::Transport)` |
-//! | hex decode failure (should never happen)       | `Err(BitswapRpcError::Decoding)` |
+//! Thin client for the substrate `bitswap_v1_get` RPC method, used by the storage-chain
+//! tests to verify that fetched indexed-transaction bytes are queryable post-import.
 
 use anyhow::{anyhow, Result};
 use std::time::Duration;

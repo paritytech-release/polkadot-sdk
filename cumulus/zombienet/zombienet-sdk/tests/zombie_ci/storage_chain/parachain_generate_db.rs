@@ -1,47 +1,13 @@
 // Copyright (C) Parity Technologies (UK) Ltd.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Database generation test for parachain sync tests.
+//! Snapshot builder for the storage-chain tip-sync tests.
 //!
-//! This test generates two pre-built databases that future sync tests can use
-//! as starting points, avoiding the need to produce blocks from genesis every time.
+//! Runs a 3-validator + 2-collator network, drives `transaction_storage::store` extrinsics
+//! against alice, then writes parachain DB / relay DB / manifest tarballs into
+//! `STORAGE_CHAIN_DB_OUTPUT_DIR` for downstream tests to consume.
 //!
-//! ## What it produces
-//!
-//! - **Archive DB**: A collator node with no pruning, containing `TARGET_BLOCKS` blocks with
-//!   indexed transaction data stored every `STORE_INTERVAL` blocks.
-//! - **Pruned DB**: A full-sync node with short `--blocks-pruning`, synced from the archive
-//!   collator. Old blocks beyond the pruning window are deleted.
-//! - **Manifest**: JSON metadata describing renewable entries for tests that consume snapshots.
-//!
-//! ## How it works
-//!
-//! 1. Spawns a parachain network: 2 relay validators + 1 archive collator + 1 pruned full node
-//! 2. Waits for session change so the parachain starts producing blocks
-//! 3. Authorizes Alice/Bob for store transactions upfront
-//! 4. Every `STORE_INTERVAL` blocks, stores 2KB of unique test data via the collator
-//! 5. Waits for both nodes to reach block `TARGET_BLOCKS` (finalized)
-//! 6. Copies parachain databases and the renewable-entry manifest to `$DB_OUTPUT_DIR` (default:
-//!    `./zombienet/test-databases/`)
-//!
-//! ## Environment Variables
-//!
-//! - `TARGET_BLOCKS` (default: `1000`)
-//! - `STORE_INTERVAL` (default: `10`)
-//! - `PRUNING_BLOCKS` (default: fixture retention period, `200`)
-//! - `RENEWABLE_STORE_COUNT` (default: `10`)
-//! - `RENEWAL_PASS_BLOCK` (default: `105`)
-//! - `RENEWAL_PASS_INTERVAL` (default: `80`)
-//! - `AUTHORIZE_TRANSACTIONS` (default: `100`)
-//! - `DB_OUTPUT_DIR`: Output directory for generated databases (default:
-//!   `./zombienet/test-databases/`)
-//! - Standard parachain env vars (see `parachain_sync_storage` module docs)
-//!
-//! ## Running
-//!
-//! ```bash
-//! just para-gen-db
-//! ```
+//! Gated by the `generate-snapshots` cargo feature.
 
 use super::utils::{
 	archive_manifest_path, blake2_256, get_alice_nonce, hash_to_cid, initialize_network,

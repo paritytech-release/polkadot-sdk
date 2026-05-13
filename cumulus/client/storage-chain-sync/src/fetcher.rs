@@ -14,25 +14,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Bitswap-based fetcher for indexed transaction blobs.
-//!
-//! Owns the late-bound network/sync handles plus the per-peer iteration policy. Knows nothing
-//! about block import: the consumer ([`crate::StorageChainBlockImport`]) decides when to call
-//! [`IndexedTransactionFetcher::fetch_many`] for a batch of `(content_hash, hashing)` pairs and
-//! what to do with the returned bytes.
-//!
-//! All CID construction lives here. The upstream `sc_network::bitswap` API is CID- and
-//! raw-byte-oriented and intentionally knows nothing about [`HashingAlgorithm`]; this module is
-//! the adapter that maps storage-chain identifiers to the network-layer CID shape.
+//! Bitswap-based fetcher for indexed-transaction blobs. Owns the late-bound network and
+//! peer-source handles; rotates across connected peers per batch.
 
 use async_trait::async_trait;
 use cid::{multihash::Multihash, Cid};
 use futures::channel::oneshot;
 use sc_network::{
 	bitswap::{
-		request_bitswap_blocks, request_bitswap_blocks_unverified, FetchOutcome,
-		BLAKE2B_256_MULTIHASH_CODE, KECCAK_256_MULTIHASH_CODE, MAX_WANTED_BLOCKS,
-		SHA2_256_MULTIHASH_CODE,
+		RAW_CODEC, request_bitswap_blocks, request_bitswap_blocks_unverified, FetchOutcome,
+		MAX_WANTED_BLOCKS,
 	},
 	NetworkRequest, PeerId,
 };
@@ -48,9 +39,6 @@ use std::{
 const LOG_TARGET: &str = "storage-chain-fetcher";
 const BITSWAP_PER_PEER_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_PEERS_PER_IMPORT: usize = 8;
-/// Multicodec for the IPFS raw codec (`0x55`). The substrate bitswap client classifies CIDs by
-/// this codec for indexed-transaction payloads.
-const RAW_CODEC: u64 = 0x55;
 
 /// Source of currently-connected sync peer IDs. Abstracted so the fetcher can be unit-tested
 /// without spinning up a full `SyncingService`. The production blanket impl on
@@ -67,26 +55,18 @@ impl<B: BlockT> BitswapPeerSource for SyncingService<B> {
 	}
 }
 
-/// Late-bound network handle populated after `build_network` returns.
+/// Late-bound network request handle, populated by the omni-node after build_network.
 pub type NetworkHandle = Arc<OnceLock<Arc<dyn NetworkRequest + Send + Sync>>>;
-/// Late-bound peer-source handle populated after `build_network` returns. Production code coerces
-/// `Arc<SyncingService<Block>>` to `Arc<dyn BitswapPeerSource + Send + Sync>` via the blanket impl
-/// in this module.
+/// Late-bound peer-source handle populated after `build_network` returns.
 pub type SyncingHandle = Arc<OnceLock<Arc<dyn BitswapPeerSource + Send + Sync>>>;
 
-/// Reasons an [`IndexedTransactionFetcher::fetch_many`] call can fail outright.
-///
-/// Per-CID misses (peer absent, peer responded `DontHave`, peer ignored entry) are *not* errors:
-/// they manifest as missing keys in the returned map. Errors here only cover infrastructure
-/// preconditions that prevent any fetch from happening at all.
+/// Infrastructure-level fetch failure.
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
 	#[error("network handle not yet set; storage-chain blocks cannot be fetched before build_network completes")]
 	NetworkHandleUnset,
 	#[error("sync handle not yet set; storage-chain blocks cannot be fetched before build_network completes")]
 	SyncingHandleUnset,
-	#[error("unsupported hashing algorithm carries no IPFS multihash code: {0:?}")]
-	UnsupportedHashing(HashingAlgorithm),
 	#[error("failed to construct multihash for CID: {0}")]
 	Multihash(String),
 }
@@ -326,20 +306,11 @@ async fn try_fetch_from_peer_unverified<N: NetworkRequest + ?Sized>(
 	acquired
 }
 
-/// Construct a CIDv1(`raw`, `<algo>-256`, `digest`) for an indexed-transaction blob.
+/// Build a CIDv1 over RAW_CODEC with the supplied hash + algorithm's multihash code.
 fn cid_for(hash: ContentHash, algo: HashingAlgorithm) -> Result<Cid, FetchError> {
-	let code = multihash_code_for(algo).ok_or(FetchError::UnsupportedHashing(algo))?;
-	let mh = Multihash::<64>::wrap(code, &hash).map_err(|e| FetchError::Multihash(e.to_string()))?;
+	let mh = Multihash::<64>::wrap(algo.multihash_code(), &hash)
+		.map_err(|e| FetchError::Multihash(e.to_string()))?;
 	Ok(Cid::new_v1(RAW_CODEC, mh))
-}
-
-/// Map an [`HashingAlgorithm`] to the upstream IPFS multihash code constant.
-fn multihash_code_for(algo: HashingAlgorithm) -> Option<u64> {
-	match algo {
-		HashingAlgorithm::Blake2b256 => Some(BLAKE2B_256_MULTIHASH_CODE),
-		HashingAlgorithm::Sha2_256 => Some(SHA2_256_MULTIHASH_CODE),
-		HashingAlgorithm::Keccak256 => Some(KECCAK_256_MULTIHASH_CODE),
-	}
 }
 
 async fn with_timeout<F, T>(fut: F, timeout: Duration) -> Option<T>

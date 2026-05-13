@@ -61,8 +61,7 @@ pub enum HashingAlgorithm {
 }
 
 impl HashingAlgorithm {
-	/// IPFS [multihash](https://github.com/multiformats/multicodec/blob/master/table.csv) code
-	/// identifying this algorithm. Used when constructing CIDs for indexed data.
+	/// IPFS multihash code identifying this algorithm for CID construction.
 	pub const fn multihash_code(self) -> u64 {
 		match self {
 			Self::Blake2b256 => 0xb220,
@@ -71,8 +70,7 @@ impl HashingAlgorithm {
 		}
 	}
 
-	/// Reverse of [`Self::multihash_code`]: maps a multihash code back to the algorithm. Returns
-	/// `None` for codes outside the supported set.
+	/// Reverse of `multihash_code`: maps a multihash code back to the algorithm.
 	pub const fn from_multihash_code(code: u64) -> Option<Self> {
 		match code {
 			0xb220 => Some(Self::Blake2b256),

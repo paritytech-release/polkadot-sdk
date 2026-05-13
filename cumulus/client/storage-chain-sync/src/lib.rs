@@ -14,26 +14,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `BlockImport` wrapper that bitswap-fetches missing TRANSACTION-column entries
-//! before delegating to the inner block import.
+//! BlockImport wrapper that bitswap-fetches missing TRANSACTION-column entries before
+//! delegating to the inner block import. Tip-sync only; gap-sync and warp-sync pass through.
 //!
-//! # Context
-//!
-//! Storage-chain parachains track indexed-data refcounts in `sc-client-db`'s TRANSACTION
-//! column. When a tip block contains a `Renew` for indexed data the local node has never
-//! stored, the inner block import calls `transaction.reference()` on a missing key — a
-//! silent no-op in kvdb — and the refcount stays at zero. Subsequent prune cycles then
-//! drop entries the runtime considered live.
-//!
-//! # Discovery dispatch
-//!
-//! [`StorageChainBlockImport::classify_renew_hashes`] sources renew hashes from one of:
-//! - Case A: existing `StorageChanges` on `params.state_action` (already executed).
-//! - Case B: re-execute via the runtime API for tip blocks not yet executed.
-//! - Case C: `TransactionStorageApi::indexed_transactions` for gap-sync blocks.
-//!
-//! Cases A/B use the unverified bitswap path (host calls lack the hashing algorithm);
-//! Case C uses the verified path. Unverified fetches are cross-checked post-commit.
+//! See `StorageChainBlockImport::classify_renew_hashes` for the Case A / B / C discovery
+//! dispatch.
 
 mod fetcher;
 
@@ -43,6 +28,7 @@ pub use fetcher::{BitswapPeerSource, IndexedTransactionFetcher, NetworkHandle, S
 use sc_client_api::backend::{
 	Backend as BackendT, TrieCacheContext, PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY,
 };
+use sc_network::bitswap::RAW_CODEC;
 use sc_client_db::{
 	classify_indexed_extrinsics, Backend, ClassifiedExtrinsic, IndexedTransactionMeta,
 };
@@ -62,7 +48,6 @@ use sp_trie::proof_size_extension::ProofSizeExt;
 use std::{collections::HashSet, marker::PhantomData, sync::Arc};
 
 const LOG_TARGET: &str = "storage-chain-block-import";
-const RAW_CID_CODEC: u64 = 0x55;
 
 /// Block-import wrapper that bitswap-fetches missing TRANSACTION-column entries
 /// for tip-sync blocks before delegating to the inner block import.
@@ -470,10 +455,12 @@ fn extract_renews_from_index_ops(ops: &[IndexOperation]) -> HashSet<ContentHash>
 		.collect()
 }
 
+#[cfg(test)]
 fn is_supported(info: &&IndexedTransactionInfo) -> bool {
-	info.cid_codec == RAW_CID_CODEC
+	info.cid_codec == RAW_CODEC
 }
 
+#[cfg(test)]
 fn to_db_meta(info: &IndexedTransactionInfo) -> IndexedTransactionMeta {
 	IndexedTransactionMeta {
 		content_hash: info.content_hash,
@@ -491,8 +478,15 @@ fn body_classify_renews<Block: BlockT>(
 	infos: &[IndexedTransactionInfo],
 	body: &[Block::Extrinsic],
 ) -> HashSet<(ContentHash, HashingAlgorithm)> {
-	let db_meta: Vec<IndexedTransactionMeta> =
-		infos.iter().filter(is_supported).map(to_db_meta).collect();
+	let db_meta: Vec<IndexedTransactionMeta> = infos.iter()
+		.filter(|info| info.cid_codec == RAW_CODEC)
+		.map(|info| IndexedTransactionMeta {
+			content_hash: info.content_hash,
+			size: info.size,
+			extrinsic_index: info.extrinsic_index,
+			hashing: info.hashing,
+		})
+		.collect();
 
 	if db_meta.is_empty() {
 		return HashSet::new();
@@ -558,7 +552,7 @@ mod tests {
 		for algo in
 			[HashingAlgorithm::Blake2b256, HashingAlgorithm::Sha2_256, HashingAlgorithm::Keccak256]
 		{
-			let i = info([0u8; 32], 100, algo, RAW_CID_CODEC, 0);
+			let i = info([0u8; 32], 100, algo, RAW_CODEC, 0);
 			assert!(is_supported(&&i), "{algo:?} should be supported with RAW codec");
 		}
 	}
@@ -580,7 +574,7 @@ mod tests {
 			content_hash: h,
 			size: 4096,
 			hashing: HashingAlgorithm::Sha2_256,
-			cid_codec: RAW_CID_CODEC,
+			cid_codec: RAW_CODEC,
 			extrinsic_index: 17,
 		};
 		let meta = to_db_meta(&i);
@@ -593,7 +587,7 @@ mod tests {
 	#[test]
 	fn body_classify_renews_returns_empty_for_supported_insert() {
 		let body = vec![extrinsic(&[1, 2, 3])];
-		let infos = vec![body_info(&body[0], 0, HashingAlgorithm::Blake2b256, RAW_CID_CODEC)];
+		let infos = vec![body_info(&body[0], 0, HashingAlgorithm::Blake2b256, RAW_CODEC)];
 
 		assert!(body_classify_renews::<Block>(&infos, &body).is_empty());
 	}
@@ -619,7 +613,7 @@ mod tests {
 			[1; 32],
 			body[0].encode().len() as u32,
 			HashingAlgorithm::Sha2_256,
-			RAW_CID_CODEC,
+			RAW_CODEC,
 			0,
 		)];
 
@@ -632,8 +626,8 @@ mod tests {
 		let body = vec![extrinsic(&[10, 11, 12])];
 		let encoded_len = body[0].encode().len() as u32;
 		let infos = vec![
-			info([2; 32], encoded_len, HashingAlgorithm::Blake2b256, RAW_CID_CODEC, 0),
-			info([3; 32], encoded_len, HashingAlgorithm::Keccak256, RAW_CID_CODEC, 0),
+			info([2; 32], encoded_len, HashingAlgorithm::Blake2b256, RAW_CODEC, 0),
+			info([3; 32], encoded_len, HashingAlgorithm::Keccak256, RAW_CODEC, 0),
 		];
 
 		let renews = body_classify_renews::<Block>(&infos, &body);
