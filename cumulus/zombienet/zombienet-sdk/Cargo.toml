@@ -47,12 +47,9 @@ statement-store-subxt-signer = { package = "subxt-signer", version = "0.50", fea
 
 sp-crypto-hashing = { workspace = true, default-features = true }
 cid = { workspace = true }
-flate2 = { workspace = true }
 hex = { workspace = true, default-features = true }
 multihash = { workspace = true, default-features = true }
-tar = { workspace = true }
 thiserror = { workspace = true }
-twox-hash = { workspace = true, default-features = true }
 
 [features]
 zombie-ci = []
