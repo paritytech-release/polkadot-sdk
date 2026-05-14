@@ -29,7 +29,10 @@ use zombienet_orchestrator::AddCollatorOptions;
 use zombienet_sdk::subxt::{config::substrate::SubstrateConfig, OnlineClient};
 
 const N_RENEW_EXERCISES: u32 = N_STORES;
-const WARP_PRUNING_BLOCKS: u32 = 100;
+// Wide enough to cover the entire renewal sequence: 30 renews × ~50s each ≈ 25 min
+// of live chain (~250 blocks at 6s blocks). Pruning earlier blocks evicts the fetched
+// indexed transactions from the local DB before bitswap_v1_get can serve them.
+const WARP_PRUNING_BLOCKS: u32 = 500;
 const SESSION_CHANGE_TIMEOUT_SECS: u64 = 300;
 const BITSWAP_RPC_POLL_TIMEOUT_SECS: u64 = 600;
 

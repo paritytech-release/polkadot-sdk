@@ -119,18 +119,15 @@ fn fixture_from_env_or_local(env_var: &str, local_path: PathBuf) -> Result<PathB
 	}
 }
 
-// Only Blake2b-256 is currently exercised end-to-end. Two pre-existing substrate
-// limitations gate the other algorithms:
-//   * Keccak256: the `bitswap_v1_get` RPC rejects Keccak CIDs per spec (only
-//     sha2-256 and blake2b-256 are permitted).
-//   * Sha2_256: the litep2p Bitswap response routing fails to match Sha2 CIDs
-//     in the requester's pending-batch map, causing `request_bitswap_blocks_unverified`
-//     to time out. The wrapper's collator-side responder DOES send Sha2 responses;
-//     the requester just never sees them. Reproduces with even one Sha2 entry.
-// Multi-hash verification on the block-import path itself still covers all three
-// algorithms (see `cumulus-client-storage-chain-sync` integration tests).
-pub fn algorithm(_i: u32) -> HashingAlgorithm {
-	HashingAlgorithm::Blake2b256
+// Keccak256 is intentionally excluded: the `bitswap_v1_get` RPC's spec only
+// permits sha2-256 and blake2b-256 hashes. Multi-hash verification on the
+// block-import path still covers Keccak (see `cumulus-client-storage-chain-sync`
+// integration tests).
+pub fn algorithm(i: u32) -> HashingAlgorithm {
+	match i % 2 {
+		0 => HashingAlgorithm::Blake2b256,
+		_ => HashingAlgorithm::Sha2_256,
+	}
 }
 
 /// Deterministic payload of size in `[PAYLOAD_SIZE_MIN, PAYLOAD_SIZE_MAX]`.
@@ -205,9 +202,10 @@ mod tests {
 	}
 
 	#[test]
-	fn algorithm_is_blake_only() {
-		for i in 0..10u32 {
-			assert_eq!(algorithm(i), HashingAlgorithm::Blake2b256);
-		}
+	fn algorithm_round_robin_blake_sha() {
+		assert_eq!(algorithm(0), HashingAlgorithm::Blake2b256);
+		assert_eq!(algorithm(1), HashingAlgorithm::Sha2_256);
+		assert_eq!(algorithm(2), HashingAlgorithm::Blake2b256);
+		assert_eq!(algorithm(3), HashingAlgorithm::Sha2_256);
 	}
 }
