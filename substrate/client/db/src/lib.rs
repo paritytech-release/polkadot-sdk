@@ -6958,89 +6958,98 @@ pub(crate) mod tests {
 	mod indexed_transaction_backend_tests {
 		use super::*;
 		use crate::utils::NUM_COLUMNS;
+		use rstest::rstest;
 		use sp_database::Transaction as DbTransaction;
-		use std::sync::Arc;
+		use std::{path::PathBuf, sync::Arc};
 		use tempfile::TempDir;
 
-		fn open_memdb_database() -> Arc<dyn Database<DbHash>> {
-			sp_database::as_database(kvdb_memorydb::create(NUM_COLUMNS))
+		#[derive(Debug, Clone, Copy)]
+		enum BackendKind {
+			KvdbMemdb,
+			ParityDb,
+			RocksDb,
 		}
 
-		fn open_paritydb_database(path: &std::path::Path) -> Arc<dyn Database<DbHash>> {
-			crate::parity_db::open::<DbHash>(path, DatabaseType::Full, true, false)
-				.expect("parity-db open succeeds in test")
+		enum DbFactory {
+			Persistent(Arc<dyn Database<DbHash>>),
+			OnDisk { path: PathBuf, kind: BackendKind, _tmp: TempDir },
 		}
 
-		fn open_rocksdb_database(path: &std::path::Path) -> Arc<dyn Database<DbHash>> {
-			let mut cfg = kvdb_rocksdb::DatabaseConfig::with_columns(NUM_COLUMNS);
-			cfg.create_if_missing = true;
-			let db = kvdb_rocksdb::Database::open(&cfg, path)
-				.expect("kvdb-rocksdb open succeeds in test");
-			sp_database::as_database(db)
+		impl DbFactory {
+			fn new(kind: BackendKind) -> Self {
+				match kind {
+					BackendKind::KvdbMemdb => Self::Persistent(sp_database::as_database(
+						kvdb_memorydb::create(NUM_COLUMNS),
+					)),
+					BackendKind::ParityDb | BackendKind::RocksDb => {
+						let tmp = TempDir::new().unwrap();
+						let path = tmp.path().to_path_buf();
+						Self::OnDisk { path, kind, _tmp: tmp }
+					},
+				}
+			}
+
+			fn open(&self) -> Arc<dyn Database<DbHash>> {
+				match self {
+					Self::Persistent(arc) => arc.clone(),
+					Self::OnDisk { path, kind: BackendKind::ParityDb, .. } =>
+						crate::parity_db::open::<DbHash>(path, DatabaseType::Full, true, false)
+							.expect("parity-db open succeeds in test"),
+					Self::OnDisk { path, kind: BackendKind::RocksDb, .. } => {
+						let mut cfg = kvdb_rocksdb::DatabaseConfig::with_columns(NUM_COLUMNS);
+						cfg.create_if_missing = true;
+						let db = kvdb_rocksdb::Database::open(&cfg, path)
+							.expect("kvdb-rocksdb open succeeds in test");
+						sp_database::as_database(db)
+					},
+					Self::OnDisk { kind: BackendKind::KvdbMemdb, .. } => unreachable!(),
+				}
+			}
 		}
 
-		fn make_memdb_backend(blocks_pruning: BlocksPruning) -> Backend<Block> {
-			Backend::new_test_with_tx_storage(blocks_pruning, 10)
+		struct BackendFactory {
+			backend: Backend<Block>,
+			_tmp: Option<TempDir>,
 		}
 
-		fn make_paritydb_backend(
-			path: &std::path::Path,
-			blocks_pruning: BlocksPruning,
-		) -> Backend<Block> {
-			Backend::new_test_with_tx_storage_source(
-				blocks_pruning,
-				10,
-				DatabaseSource::ParityDb { path: path.to_path_buf() },
-				Default::default(),
-			)
-		}
+		impl BackendFactory {
+			fn new(kind: BackendKind, blocks_pruning: BlocksPruning) -> Self {
+				match kind {
+					BackendKind::KvdbMemdb => Self {
+						backend: Backend::new_test_with_tx_storage(blocks_pruning, 10),
+						_tmp: None,
+					},
+					BackendKind::ParityDb => {
+						let tmp = TempDir::new().unwrap();
+						let backend = Backend::new_test_with_tx_storage_source(
+							blocks_pruning,
+							10,
+							DatabaseSource::ParityDb { path: tmp.path().to_path_buf() },
+							Default::default(),
+						);
+						Self { backend, _tmp: Some(tmp) }
+					},
+					BackendKind::RocksDb => {
+						let tmp = TempDir::new().unwrap();
+						let mut cfg = kvdb_rocksdb::DatabaseConfig::with_columns(NUM_COLUMNS);
+						cfg.create_if_missing = true;
+						let db = kvdb_rocksdb::Database::open(&cfg, tmp.path())
+							.expect("kvdb-rocksdb open succeeds in test");
+						let db = sp_database::as_database(db);
+						let backend = Backend::new_test_with_tx_storage_source(
+							blocks_pruning,
+							10,
+							DatabaseSource::Custom { db, require_create_flag: true },
+							Default::default(),
+						);
+						Self { backend, _tmp: Some(tmp) }
+					},
+				}
+			}
 
-		fn make_rocksdb_backend(
-			path: &std::path::Path,
-			blocks_pruning: BlocksPruning,
-		) -> Backend<Block> {
-			let db = open_rocksdb_database(path);
-			Backend::new_test_with_tx_storage_source(
-				blocks_pruning,
-				10,
-				DatabaseSource::Custom { db, require_create_flag: true },
-				Default::default(),
-			)
-		}
-
-		type OpenDb<'a> = dyn Fn() -> Arc<dyn Database<DbHash>> + 'a;
-
-		fn run_with_memdb_db<F: FnOnce(&OpenDb<'_>)>(f: F) {
-			let db = open_memdb_database();
-			f(&|| db.clone());
-		}
-
-		fn run_with_paritydb_db<F: FnOnce(&OpenDb<'_>)>(f: F) {
-			let tmp = TempDir::new().unwrap();
-			let path = tmp.path().to_path_buf();
-			f(&|| open_paritydb_database(&path));
-		}
-
-		fn run_with_rocksdb_db<F: FnOnce(&OpenDb<'_>)>(f: F) {
-			let tmp = TempDir::new().unwrap();
-			let path = tmp.path().to_path_buf();
-			f(&|| open_rocksdb_database(&path));
-		}
-
-		fn run_with_paritydb_backend<F: FnOnce(Backend<Block>)>(
-			blocks_pruning: BlocksPruning,
-			f: F,
-		) {
-			let tmp = TempDir::new().unwrap();
-			f(make_paritydb_backend(tmp.path(), blocks_pruning));
-		}
-
-		fn run_with_rocksdb_backend<F: FnOnce(Backend<Block>)>(
-			blocks_pruning: BlocksPruning,
-			f: F,
-		) {
-			let tmp = TempDir::new().unwrap();
-			f(make_rocksdb_backend(tmp.path(), blocks_pruning));
+			fn backend(&self) -> &Backend<Block> {
+				&self.backend
+			}
 		}
 
 		const TEST_COL: u32 = columns::TRANSACTION;
@@ -7049,135 +7058,107 @@ pub(crate) mod tests {
 			DbHash::repeat_byte(seed)
 		}
 
-		fn commit_store(open_db: &OpenDb<'_>, h: DbHash, bytes: Vec<u8>) {
-			let db = open_db();
+		fn commit_store(factory: &DbFactory, h: DbHash, bytes: Vec<u8>) {
+			let db = factory.open();
 			let mut tx = DbTransaction::new();
 			tx.store(TEST_COL, h, bytes);
 			db.commit(tx).unwrap();
 		}
 
-		fn commit_reference(open_db: &OpenDb<'_>, h: DbHash) {
-			let db = open_db();
+		fn commit_reference(factory: &DbFactory, h: DbHash) {
+			let db = factory.open();
 			let mut tx = DbTransaction::new();
 			tx.reference(TEST_COL, h);
 			db.commit(tx).unwrap();
 		}
 
-		fn commit_release(open_db: &OpenDb<'_>, h: DbHash) {
-			let db = open_db();
+		fn commit_release(factory: &DbFactory, h: DbHash) {
+			let db = factory.open();
 			let mut tx = DbTransaction::new();
 			tx.release(TEST_COL, h);
 			db.commit(tx).unwrap();
 		}
 
-		fn get_value(open_db: &OpenDb<'_>, h: DbHash) -> Option<Vec<u8>> {
-			let db = open_db();
-			db.get(TEST_COL, h.as_ref())
+		fn get_value(factory: &DbFactory, h: DbHash) -> Option<Vec<u8>> {
+			factory.open().get(TEST_COL, h.as_ref())
 		}
 
-		fn check_a1_store_then_get(open_db: &OpenDb<'_>) {
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn a1_store_then_get(#[case] kind: BackendKind) {
+			let factory = DbFactory::new(kind);
 			let h = hash(0xA1);
 			let bytes = b"a1-bytes".to_vec();
-			commit_store(open_db, h, bytes.clone());
-			assert_eq!(get_value(open_db, h).as_deref(), Some(bytes.as_slice()));
+			commit_store(&factory, h, bytes.clone());
+			assert_eq!(get_value(&factory, h).as_deref(), Some(bytes.as_slice()));
 		}
 
-		#[test]
-		fn a1_store_then_get_memdb() {
-			run_with_memdb_db(check_a1_store_then_get);
-		}
-		#[test]
-		fn a1_store_then_get_paritydb() {
-			run_with_paritydb_db(check_a1_store_then_get);
-		}
-		#[test]
-		fn a1_store_then_get_rocksdb() {
-			run_with_rocksdb_db(check_a1_store_then_get);
-		}
-
-		fn check_a2_store_then_release_separate_commits(open_db: &OpenDb<'_>) {
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn a2_store_release_separate_commits(#[case] kind: BackendKind) {
+			let factory = DbFactory::new(kind);
 			let h = hash(0xA2);
 			let bytes = b"a2-bytes".to_vec();
-			commit_store(open_db, h, bytes.clone());
-			assert!(get_value(open_db, h).is_some(), "present after store");
-			commit_release(open_db, h);
-			assert!(get_value(open_db, h).is_none(), "gone after release");
+			commit_store(&factory, h, bytes);
+			assert!(get_value(&factory, h).is_some(), "present after store");
+			commit_release(&factory, h);
+			assert!(get_value(&factory, h).is_none(), "gone after release");
 		}
 
-		#[test]
-		fn a2_store_release_separate_commits_memdb() {
-			run_with_memdb_db(check_a2_store_then_release_separate_commits);
-		}
-		#[test]
-		fn a2_store_release_separate_commits_paritydb() {
-			run_with_paritydb_db(check_a2_store_then_release_separate_commits);
-		}
-		#[test]
-		fn a2_store_release_separate_commits_rocksdb() {
-			run_with_rocksdb_db(check_a2_store_then_release_separate_commits);
-		}
-
-		fn check_a3_store_reference_release_release_separate_commits(open_db: &OpenDb<'_>) {
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn a3_store_reference_release_release_separate_commits(#[case] kind: BackendKind) {
+			let factory = DbFactory::new(kind);
 			let h = hash(0xA3);
 			let bytes = b"a3-bytes".to_vec();
-			commit_store(open_db, h, bytes);
-			commit_reference(open_db, h);
-			assert!(get_value(open_db, h).is_some(), "rc=2 after reference");
-			commit_release(open_db, h);
-			assert!(get_value(open_db, h).is_some(), "rc=1 still present");
-			commit_release(open_db, h);
-			assert!(get_value(open_db, h).is_none(), "rc=0 removed");
+			commit_store(&factory, h, bytes);
+			commit_reference(&factory, h);
+			assert!(get_value(&factory, h).is_some(), "rc=2 after reference");
+			commit_release(&factory, h);
+			assert!(get_value(&factory, h).is_some(), "rc=1 still present");
+			commit_release(&factory, h);
+			assert!(get_value(&factory, h).is_none(), "rc=0 removed");
 		}
 
-		#[test]
-		fn a3_store_reference_release_release_separate_commits_memdb() {
-			run_with_memdb_db(check_a3_store_reference_release_release_separate_commits);
-		}
-		#[test]
-		fn a3_store_reference_release_release_separate_commits_paritydb() {
-			run_with_paritydb_db(check_a3_store_reference_release_release_separate_commits);
-		}
-		#[test]
-		fn a3_store_reference_release_release_separate_commits_rocksdb() {
-			run_with_rocksdb_db(check_a3_store_reference_release_release_separate_commits);
-		}
-
-		fn check_a4_store_then_reference_same_commit_keeps_value(open_db: &OpenDb<'_>) {
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn a4_store_then_reference_same_commit_keeps_value(#[case] kind: BackendKind) {
+			let factory = DbFactory::new(kind);
 			let h = hash(0xA4);
 			let bytes = b"a4-bytes".to_vec();
 			{
-				let db = open_db();
+				let db = factory.open();
 				let mut tx = DbTransaction::new();
 				tx.store(TEST_COL, h, bytes.clone());
 				tx.reference(TEST_COL, h);
 				db.commit(tx).unwrap();
 			}
 			assert_eq!(
-				get_value(open_db, h).as_deref(),
+				get_value(&factory, h).as_deref(),
 				Some(bytes.as_slice()),
 				"Store + Reference on fresh hash in a single commit must keep the value \
 				 (observed via fresh DB handle so overlay caching is bypassed)",
 			);
 		}
 
-		#[test]
-		fn a4_store_then_reference_same_commit_keeps_value_memdb() {
-			run_with_memdb_db(check_a4_store_then_reference_same_commit_keeps_value);
-		}
-		#[test]
-		fn a4_store_then_reference_same_commit_keeps_value_paritydb() {
-			run_with_paritydb_db(check_a4_store_then_reference_same_commit_keeps_value);
-		}
-		#[test]
-		fn a4_store_then_reference_same_commit_keeps_value_rocksdb() {
-			run_with_rocksdb_db(check_a4_store_then_reference_same_commit_keeps_value);
-		}
-
-		fn check_a5_store_then_two_references_same_commit_keeps_value(open_db: &OpenDb<'_>) {
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn a5_store_then_two_references_same_commit_keeps_value(#[case] kind: BackendKind) {
+			let factory = DbFactory::new(kind);
 			let h = hash(0xA5);
 			let bytes = b"a5-bytes".to_vec();
 			{
-				let db = open_db();
+				let db = factory.open();
 				let mut tx = DbTransaction::new();
 				tx.store(TEST_COL, h, bytes.clone());
 				tx.reference(TEST_COL, h);
@@ -7185,90 +7166,51 @@ pub(crate) mod tests {
 				db.commit(tx).unwrap();
 			}
 			assert_eq!(
-				get_value(open_db, h).as_deref(),
+				get_value(&factory, h).as_deref(),
 				Some(bytes.as_slice()),
 				"Store + 2x Reference on fresh hash must keep the value (post-sync observation)",
 			);
 		}
 
-		#[test]
-		fn a5_store_then_two_references_same_commit_keeps_value_memdb() {
-			run_with_memdb_db(check_a5_store_then_two_references_same_commit_keeps_value);
-		}
-		#[test]
-		fn a5_store_then_two_references_same_commit_keeps_value_paritydb() {
-			run_with_paritydb_db(check_a5_store_then_two_references_same_commit_keeps_value);
-		}
-		#[test]
-		fn a5_store_then_two_references_same_commit_keeps_value_rocksdb() {
-			run_with_rocksdb_db(check_a5_store_then_two_references_same_commit_keeps_value);
-		}
-
-		fn check_a6_reference_on_missing_hash_is_noop(open_db: &OpenDb<'_>) {
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn a6_reference_on_missing_hash_is_noop(#[case] kind: BackendKind) {
+			let factory = DbFactory::new(kind);
 			let h = hash(0xA6);
-			commit_reference(open_db, h);
-			assert!(
-				get_value(open_db, h).is_none(),
-				"reference on missing key is a no-op",
-			);
+			commit_reference(&factory, h);
+			assert!(get_value(&factory, h).is_none(), "reference on missing key is a no-op");
 			let bytes = b"a6-bytes".to_vec();
-			commit_store(open_db, h, bytes.clone());
-			assert_eq!(get_value(open_db, h).as_deref(), Some(bytes.as_slice()));
-			commit_release(open_db, h);
-			assert!(
-				get_value(open_db, h).is_none(),
-				"single release balances the store",
-			);
+			commit_store(&factory, h, bytes.clone());
+			assert_eq!(get_value(&factory, h).as_deref(), Some(bytes.as_slice()));
+			commit_release(&factory, h);
+			assert!(get_value(&factory, h).is_none(), "single release balances the store");
 		}
 
-		#[test]
-		fn a6_reference_on_missing_hash_is_noop_memdb() {
-			run_with_memdb_db(check_a6_reference_on_missing_hash_is_noop);
-		}
-		#[test]
-		fn a6_reference_on_missing_hash_is_noop_paritydb() {
-			run_with_paritydb_db(check_a6_reference_on_missing_hash_is_noop);
-		}
-		#[test]
-		fn a6_reference_on_missing_hash_is_noop_rocksdb() {
-			run_with_rocksdb_db(check_a6_reference_on_missing_hash_is_noop);
-		}
-
-		fn check_a7_release_on_missing_hash_is_noop(open_db: &OpenDb<'_>) {
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn a7_release_on_missing_hash_is_noop(#[case] kind: BackendKind) {
+			let factory = DbFactory::new(kind);
 			let h = hash(0xA7);
-			commit_release(open_db, h);
-			assert!(
-				get_value(open_db, h).is_none(),
-				"release on missing key is a no-op",
-			);
+			commit_release(&factory, h);
+			assert!(get_value(&factory, h).is_none(), "release on missing key is a no-op");
 			let bytes = b"a7-bytes".to_vec();
-			commit_store(open_db, h, bytes.clone());
-			assert_eq!(get_value(open_db, h).as_deref(), Some(bytes.as_slice()));
-		}
-
-		#[test]
-		fn a7_release_on_missing_hash_is_noop_memdb() {
-			run_with_memdb_db(check_a7_release_on_missing_hash_is_noop);
-		}
-		#[test]
-		fn a7_release_on_missing_hash_is_noop_paritydb() {
-			run_with_paritydb_db(check_a7_release_on_missing_hash_is_noop);
-		}
-		#[test]
-		fn a7_release_on_missing_hash_is_noop_rocksdb() {
-			run_with_rocksdb_db(check_a7_release_on_missing_hash_is_noop);
+			commit_store(&factory, h, bytes.clone());
+			assert_eq!(get_value(&factory, h).as_deref(), Some(bytes.as_slice()));
 		}
 
 		fn check_b1_prefetched_renew_creates_transaction_entry_atomically(
-			backend: Backend<Block>,
+			backend: &Backend<Block>,
 		) {
 			let payload = b"prefetched-blob-B1".to_vec();
-			let payload_hash =
-				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
 
 			let block0 = insert_block_with_prefetched(
-				&backend,
+				backend,
 				0,
 				Default::default(),
 				Default::default(),
@@ -7292,51 +7234,32 @@ pub(crate) mod tests {
 			assert_eq!(body[0], payload);
 		}
 
-		#[test]
-		fn b1_prefetched_renew_creates_transaction_entry_atomically_memdb() {
-			check_b1_prefetched_renew_creates_transaction_entry_atomically(make_memdb_backend(
-				BlocksPruning::Some(2),
-			));
-		}
-		#[test]
-		fn b1_prefetched_renew_creates_transaction_entry_atomically_paritydb() {
-			run_with_paritydb_backend(
-				BlocksPruning::Some(2),
-				check_b1_prefetched_renew_creates_transaction_entry_atomically,
-			);
-		}
-		#[test]
-		fn b1_prefetched_renew_creates_transaction_entry_atomically_rocksdb() {
-			run_with_rocksdb_backend(
-				BlocksPruning::Some(2),
-				check_b1_prefetched_renew_creates_transaction_entry_atomically,
-			);
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn b1_prefetched_renew_creates_transaction_entry_atomically(#[case] kind: BackendKind) {
+			let factory = BackendFactory::new(kind, BlocksPruning::Some(2));
+			check_b1_prefetched_renew_creates_transaction_entry_atomically(factory.backend());
 		}
 
 		fn check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle(
-			backend: Backend<Block>,
+			backend: &Backend<Block>,
 		) {
 			let payload = b"prefetched-blob-B2".to_vec();
-			let payload_hash =
-				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
 
 			let mut blocks = Vec::new();
 			let block0 = insert_block_with_prefetched(
-				&backend,
+				backend,
 				0,
 				Default::default(),
 				Default::default(),
 				vec![UncheckedXt::new_transaction(0.into(), ())],
 				Some(vec![
-					IndexOperation::Renew {
-						extrinsic: 0,
-						hash: payload_hash_arr.to_vec(),
-					},
-					IndexOperation::Renew {
-						extrinsic: 0,
-						hash: payload_hash_arr.to_vec(),
-					},
+					IndexOperation::Renew { extrinsic: 0, hash: payload_hash_arr.to_vec() },
+					IndexOperation::Renew { extrinsic: 0, hash: payload_hash_arr.to_vec() },
 				]),
 				vec![(payload_hash_arr, payload.clone())],
 			)
@@ -7348,7 +7271,7 @@ pub(crate) mod tests {
 			let mut prev = block0;
 			for i in 1..6u64 {
 				prev = insert_block(
-					&backend,
+					backend,
 					i,
 					prev,
 					None,
@@ -7373,38 +7296,23 @@ pub(crate) mod tests {
 			);
 		}
 
-		#[test]
-		fn b2_prefetched_multi_renew_same_hash_balanced_lifecycle_memdb() {
-			check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle(make_memdb_backend(
-				BlocksPruning::Some(2),
-			));
-		}
-		#[test]
-		fn b2_prefetched_multi_renew_same_hash_balanced_lifecycle_paritydb() {
-			run_with_paritydb_backend(
-				BlocksPruning::Some(2),
-				check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle,
-			);
-		}
-		#[test]
-		fn b2_prefetched_multi_renew_same_hash_balanced_lifecycle_rocksdb() {
-			run_with_rocksdb_backend(
-				BlocksPruning::Some(2),
-				check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle,
-			);
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn b2_prefetched_multi_renew_same_hash_balanced_lifecycle(#[case] kind: BackendKind) {
+			let factory = BackendFactory::new(kind, BlocksPruning::Some(2));
+			check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle(factory.backend());
 		}
 
-		fn check_b3_prefetched_renew_with_existing_data_keeps_value(
-			backend: Backend<Block>,
-		) {
+		fn check_b3_prefetched_renew_with_existing_data_keeps_value(backend: &Backend<Block>) {
 			let payload_xt = UncheckedXt::new_transaction(7.into(), ()).encode();
 			let payload = payload_xt[1..].to_vec();
-			let payload_hash =
-				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
 
 			let block0 = insert_block(
-				&backend,
+				backend,
 				0,
 				Default::default(),
 				None,
@@ -7421,7 +7329,7 @@ pub(crate) mod tests {
 			assert!(backend.blockchain().indexed_transaction(payload_hash).unwrap().is_some());
 
 			let block1 = insert_block_with_prefetched(
-				&backend,
+				backend,
 				1,
 				block0,
 				Default::default(),
@@ -7445,38 +7353,25 @@ pub(crate) mod tests {
 			assert_eq!(body[0], payload);
 		}
 
-		#[test]
-		fn b3_prefetched_renew_with_existing_data_keeps_value_memdb() {
-			check_b3_prefetched_renew_with_existing_data_keeps_value(make_memdb_backend(
-				BlocksPruning::Some(10),
-			));
-		}
-		#[test]
-		fn b3_prefetched_renew_with_existing_data_keeps_value_paritydb() {
-			run_with_paritydb_backend(
-				BlocksPruning::Some(10),
-				check_b3_prefetched_renew_with_existing_data_keeps_value,
-			);
-		}
-		#[test]
-		fn b3_prefetched_renew_with_existing_data_keeps_value_rocksdb() {
-			run_with_rocksdb_backend(
-				BlocksPruning::Some(10),
-				check_b3_prefetched_renew_with_existing_data_keeps_value,
-			);
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn b3_prefetched_renew_with_existing_data_keeps_value(#[case] kind: BackendKind) {
+			let factory = BackendFactory::new(kind, BlocksPruning::Some(10));
+			check_b3_prefetched_renew_with_existing_data_keeps_value(factory.backend());
 		}
 
 		fn check_b4_prefetched_single_renew_full_lifecycle_through_prune(
-			backend: Backend<Block>,
+			backend: &Backend<Block>,
 		) {
 			let payload = b"prefetched-blob-B4".to_vec();
-			let payload_hash =
-				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
 
 			let mut blocks = Vec::new();
 			let block0 = insert_block_with_prefetched(
-				&backend,
+				backend,
 				0,
 				Default::default(),
 				Default::default(),
@@ -7499,7 +7394,7 @@ pub(crate) mod tests {
 			let mut prev = block0;
 			for i in 1..6u64 {
 				prev = insert_block(
-					&backend,
+					backend,
 					i,
 					prev,
 					None,
@@ -7524,39 +7419,26 @@ pub(crate) mod tests {
 			);
 		}
 
-		#[test]
-		fn b4_prefetched_single_renew_full_lifecycle_memdb() {
-			check_b4_prefetched_single_renew_full_lifecycle_through_prune(make_memdb_backend(
-				BlocksPruning::Some(2),
-			));
-		}
-		#[test]
-		fn b4_prefetched_single_renew_full_lifecycle_paritydb() {
-			run_with_paritydb_backend(
-				BlocksPruning::Some(2),
-				check_b4_prefetched_single_renew_full_lifecycle_through_prune,
-			);
-		}
-		#[test]
-		fn b4_prefetched_single_renew_full_lifecycle_rocksdb() {
-			run_with_rocksdb_backend(
-				BlocksPruning::Some(2),
-				check_b4_prefetched_single_renew_full_lifecycle_through_prune,
-			);
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn b4_prefetched_single_renew_full_lifecycle(#[case] kind: BackendKind) {
+			let factory = BackendFactory::new(kind, BlocksPruning::Some(2));
+			check_b4_prefetched_single_renew_full_lifecycle_through_prune(factory.backend());
 		}
 
 		fn check_b5_redundant_prefetch_on_local_data_balanced_lifecycle(
-			backend: Backend<Block>,
+			backend: &Backend<Block>,
 		) {
 			let payload_xt = UncheckedXt::new_transaction(5.into(), ()).encode();
 			let payload = payload_xt[1..].to_vec();
-			let payload_hash =
-				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
 
 			let mut blocks = Vec::new();
 			let block0 = insert_block(
-				&backend,
+				backend,
 				0,
 				Default::default(),
 				None,
@@ -7572,7 +7454,7 @@ pub(crate) mod tests {
 			blocks.push(block0);
 
 			let block1 = insert_block_with_prefetched(
-				&backend,
+				backend,
 				1,
 				block0,
 				Default::default(),
@@ -7591,7 +7473,7 @@ pub(crate) mod tests {
 			let mut prev = block1;
 			for i in 2..7u64 {
 				prev = insert_block(
-					&backend,
+					backend,
 					i,
 					prev,
 					None,
@@ -7616,29 +7498,17 @@ pub(crate) mod tests {
 			);
 		}
 
-		#[test]
-		fn b5_redundant_prefetch_on_local_data_balanced_lifecycle_memdb() {
-			check_b5_redundant_prefetch_on_local_data_balanced_lifecycle(make_memdb_backend(
-				BlocksPruning::Some(2),
-			));
-		}
-		#[test]
-		fn b5_redundant_prefetch_on_local_data_balanced_lifecycle_paritydb() {
-			run_with_paritydb_backend(
-				BlocksPruning::Some(2),
-				check_b5_redundant_prefetch_on_local_data_balanced_lifecycle,
-			);
-		}
-		#[test]
-		fn b5_redundant_prefetch_on_local_data_balanced_lifecycle_rocksdb() {
-			run_with_rocksdb_backend(
-				BlocksPruning::Some(2),
-				check_b5_redundant_prefetch_on_local_data_balanced_lifecycle,
-			);
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn b5_redundant_prefetch_on_local_data_balanced_lifecycle(#[case] kind: BackendKind) {
+			let factory = BackendFactory::new(kind, BlocksPruning::Some(2));
+			check_b5_redundant_prefetch_on_local_data_balanced_lifecycle(factory.backend());
 		}
 
 		fn check_b6_same_block_insert_and_renew_different_indices_with_prefetch(
-			backend: Backend<Block>,
+			backend: &Backend<Block>,
 		) {
 			let x_xt = UncheckedXt::new_transaction(0.into(), ()).encode();
 			let x = x_xt[1..].to_vec();
@@ -7648,7 +7518,7 @@ pub(crate) mod tests {
 			let mut blocks = Vec::new();
 
 			let block0 = insert_block(
-				&backend,
+				backend,
 				0,
 				Default::default(),
 				None,
@@ -7664,7 +7534,7 @@ pub(crate) mod tests {
 			blocks.push(block0);
 
 			let block1 = insert_block_with_prefetched(
-				&backend,
+				backend,
 				1,
 				block0,
 				Default::default(),
@@ -7690,7 +7560,7 @@ pub(crate) mod tests {
 			let mut prev = block1;
 			for i in 2..8u64 {
 				prev = insert_block(
-					&backend,
+					backend,
 					i,
 					prev,
 					None,
@@ -7715,40 +7585,29 @@ pub(crate) mod tests {
 			);
 		}
 
-		#[test]
-		fn b6_same_block_insert_and_renew_different_indices_with_prefetch_memdb() {
-			check_b6_same_block_insert_and_renew_different_indices_with_prefetch(
-				make_memdb_backend(BlocksPruning::Some(2)),
-			);
-		}
-		#[test]
-		fn b6_same_block_insert_and_renew_different_indices_with_prefetch_paritydb() {
-			run_with_paritydb_backend(
-				BlocksPruning::Some(2),
-				check_b6_same_block_insert_and_renew_different_indices_with_prefetch,
-			);
-		}
-		#[test]
-		fn b6_same_block_insert_and_renew_different_indices_with_prefetch_rocksdb() {
-			run_with_rocksdb_backend(
-				BlocksPruning::Some(2),
-				check_b6_same_block_insert_and_renew_different_indices_with_prefetch,
-			);
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn b6_same_block_insert_and_renew_different_indices_with_prefetch(
+			#[case] kind: BackendKind,
+		) {
+			let factory = BackendFactory::new(kind, BlocksPruning::Some(2));
+			check_b6_same_block_insert_and_renew_different_indices_with_prefetch(factory.backend());
 		}
 
 		fn check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned(
-			backend: Backend<Block>,
+			backend: &Backend<Block>,
 		) {
 			let payload = b"prefetched-blob-B7".to_vec();
-			let payload_hash =
-				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
 
 			let mut blocks = Vec::new();
 			let mut prev = Default::default();
 			for i in 0..4u64 {
 				let block = insert_block_with_prefetched(
-					&backend,
+					backend,
 					i,
 					prev,
 					Default::default(),
@@ -7768,7 +7627,7 @@ pub(crate) mod tests {
 
 			for i in 4..10u64 {
 				prev = insert_block(
-					&backend,
+					backend,
 					i,
 					prev,
 					None,
@@ -7793,25 +7652,13 @@ pub(crate) mod tests {
 			);
 		}
 
-		#[test]
-		fn b7_sequential_renew_blocks_all_prefetched_eventually_pruned_memdb() {
-			check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned(make_memdb_backend(
-				BlocksPruning::Some(2),
-			));
-		}
-		#[test]
-		fn b7_sequential_renew_blocks_all_prefetched_eventually_pruned_paritydb() {
-			run_with_paritydb_backend(
-				BlocksPruning::Some(2),
-				check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned,
-			);
-		}
-		#[test]
-		fn b7_sequential_renew_blocks_all_prefetched_eventually_pruned_rocksdb() {
-			run_with_rocksdb_backend(
-				BlocksPruning::Some(2),
-				check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned,
-			);
+		#[rstest]
+		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
+		#[case::paritydb(BackendKind::ParityDb)]
+		#[case::rocksdb(BackendKind::RocksDb)]
+		fn b7_sequential_renew_blocks_all_prefetched_eventually_pruned(#[case] kind: BackendKind) {
+			let factory = BackendFactory::new(kind, BlocksPruning::Some(2));
+			check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned(factory.backend());
 		}
 	}
 }
