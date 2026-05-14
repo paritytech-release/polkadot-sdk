@@ -66,9 +66,18 @@ pub(crate) struct BitswapOutboundCmd {
 }
 
 /// Pending outbound WANT batch.
+///
+/// Responses are accumulated **positionally**, not by CID. litep2p reconstructs the response
+/// CID by re-hashing `block.data` with the algorithm declared in the wire prefix, which only
+/// matches the wantlist CID when the requester knew the right algorithm up front. The
+/// unverified fetch path in cumulus does not know the algorithm in advance (it only learns it
+/// after fetching, by hashing the bytes with each supported algorithm), so it uses a
+/// placeholder CID per the wantlist convention. CID-keyed matching would drop every such
+/// response. Positional matching, combined with the substrate-side prefix-aware classifier in
+/// [`crate::bitswap::client::classify_response_unverified`], correctly attributes the bytes.
 struct PendingBatch {
 	cids: Vec<Cid>,
-	responses: HashMap<Cid, ResponseType>,
+	responses: Vec<ResponseType>,
 	response_bytes: usize,
 	response_tx: Option<ResponseSender>,
 	inserted: Instant,
@@ -78,21 +87,20 @@ impl PendingBatch {
 	fn new(cids: Vec<Cid>, response_tx: ResponseSender, inserted: Instant) -> Self {
 		Self {
 			cids,
-			responses: HashMap::new(),
+			responses: Vec::new(),
 			response_bytes: 0,
 			response_tx: Some(response_tx),
 			inserted,
 		}
 	}
 
-	fn record_responses(&mut self, responses: &HashMap<Cid, ResponseType>) {
-		for cid in &self.cids {
-			if self.responses.contains_key(cid) {
-				continue;
+	fn record_responses(&mut self, responses: &[ResponseType]) {
+		for resp in responses {
+			if self.responses.len() >= self.cids.len() {
+				break;
 			}
-			let Some(resp) = responses.get(cid) else { continue };
 			self.response_bytes = self.response_bytes.saturating_add(response_retained_bytes(resp));
-			self.responses.insert(*cid, resp.clone());
+			self.responses.push(resp.clone());
 		}
 	}
 
@@ -109,9 +117,7 @@ impl PendingBatch {
 	}
 
 	fn send_success(&mut self) {
-		let responses: Vec<ResponseType> =
-			self.cids.iter().filter_map(|cid| self.responses.get(cid).cloned()).collect();
-		let encoded = encode_responses_as_bitswap_message(&responses);
+		let encoded = encode_responses_as_bitswap_message(&self.responses);
 		if let Some(response_tx) = self.response_tx.take() {
 			let _ = response_tx.send(Ok((encoded, ProtocolName::from(PROTOCOL_NAME))));
 		}
@@ -162,10 +168,9 @@ impl PendingBatches {
 		);
 
 		let Some(peer_batches) = self.by_peer.get_mut(&peer) else { return };
-		let best = select_best_response_per_cid(responses);
 
 		peer_batches.retain_mut(|batch| {
-			batch.record_responses(&best);
+			batch.record_responses(&responses);
 
 			if batch.is_over_limit(max_response_bytes) {
 				log::warn!(
@@ -341,31 +346,6 @@ fn inbound_wantlist_exceeds_limit(len: usize) -> bool {
 	len > MAX_WANTED_BLOCKS
 }
 
-/// Collapse a response list into at most one entry per CID, preferring `Block`
-/// over `Presence` when both arrive for the same CID.
-fn select_best_response_per_cid(responses: Vec<ResponseType>) -> HashMap<Cid, ResponseType> {
-	let mut best: HashMap<Cid, ResponseType> = HashMap::new();
-	for resp in responses {
-		let cid = match &resp {
-			ResponseType::Block { cid, .. } => *cid,
-			ResponseType::Presence { cid, .. } => *cid,
-		};
-		match best.entry(cid) {
-			std::collections::hash_map::Entry::Vacant(e) => {
-				e.insert(resp);
-			},
-			std::collections::hash_map::Entry::Occupied(mut e) => {
-				if matches!(resp, ResponseType::Block { .. }) &&
-					matches!(*e.get(), ResponseType::Presence { .. })
-				{
-					e.insert(resp);
-				}
-			},
-		}
-	}
-	best
-}
-
 /// Return the byte size of a response that counts toward the pending batch cap.
 fn response_retained_bytes(response: &ResponseType) -> usize {
 	match response {
@@ -410,8 +390,12 @@ mod tests {
 	}
 
 	fn make_cid(byte: u8) -> Cid {
+		cid_with_code(byte, 0xb220)
+	}
+
+	fn cid_with_code(byte: u8, mh_code: u64) -> Cid {
 		let digest = [byte; 32];
-		let mh = CidMultihash::<64>::wrap(0xb220, &digest).unwrap();
+		let mh = CidMultihash::<64>::wrap(mh_code, &digest).unwrap();
 		Cid::new_v1(0x55, mh)
 	}
 
@@ -446,52 +430,6 @@ mod tests {
 		assert_eq!(msg.payload[0].data, data);
 		assert_eq!(msg.block_presences.len(), 1);
 		assert_eq!(msg.block_presences[0].r#type, ProtoPresenceType::DontHave as i32);
-	}
-
-	#[test]
-	fn select_best_prefers_block_over_presence() {
-		let cid = make_cid(3);
-		let data = b"data".to_vec();
-		let responses = vec![
-			ResponseType::Presence { cid, presence: BlockPresenceType::Have },
-			ResponseType::Block { cid, block: data.clone() },
-		];
-		let best = select_best_response_per_cid(responses);
-		assert_eq!(best.len(), 1);
-		match best.into_iter().next().unwrap().1 {
-			ResponseType::Block { block, .. } => assert_eq!(block, data),
-			_ => panic!("expected Block to win"),
-		}
-	}
-
-	#[test]
-	fn select_best_prefers_block_over_presence_regardless_of_order() {
-		let cid = make_cid(4);
-		let data = b"data-reversed".to_vec();
-		let responses = vec![
-			ResponseType::Block { cid, block: data.clone() },
-			ResponseType::Presence { cid, presence: BlockPresenceType::Have },
-		];
-		let best = select_best_response_per_cid(responses);
-		assert_eq!(best.len(), 1);
-		match best.into_iter().next().unwrap().1 {
-			ResponseType::Block { block, .. } => assert_eq!(block, data),
-			_ => panic!("expected Block to win"),
-		}
-	}
-
-	#[test]
-	fn select_best_keeps_distinct_cids() {
-		let cid_a = make_cid(5);
-		let cid_b = make_cid(6);
-		let responses = vec![
-			ResponseType::Block { cid: cid_a, block: b"a".to_vec() },
-			ResponseType::Presence { cid: cid_b, presence: BlockPresenceType::DontHave },
-		];
-		let best = select_best_response_per_cid(responses);
-		assert_eq!(best.len(), 2);
-		assert!(best.contains_key(&cid_a));
-		assert!(best.contains_key(&cid_b));
 	}
 
 	#[tokio::test]
@@ -649,5 +587,110 @@ mod tests {
 		assert!(rx_a.try_recv().unwrap().is_none());
 		assert_eq!(pending.len(), 1);
 		assert!(pending.contains_key(&peer_a));
+	}
+
+	// Regression test: substrate's unverified fetch path sends placeholder Blake CIDs
+	// (the algorithm is unknown until the bytes are hashed locally). litep2p's response
+	// decoder re-hashes the data and constructs a response CID that does NOT match the
+	// wantlist CID when the data was originally hashed with a different algorithm.
+	// PendingBatch must accept the response positionally regardless of CID mismatch.
+	#[tokio::test]
+	async fn pending_batch_accepts_sha2_response_for_blake_wantlist() {
+		let peer = make_peer();
+		let wanted = cid_with_code(1, 0xb220);
+		let response_cid = cid_with_code(2, 0x12);
+		let data = b"sha2-payload".to_vec();
+
+		let (tx, rx) = oneshot::channel();
+		let mut pending = PendingBatches::default();
+		pending.insert(peer, pending_batch(vec![wanted], tx, Instant::now()));
+
+		pending
+			.handle_response(peer, vec![ResponseType::Block { cid: response_cid, block: data.clone() }]);
+
+		let (payload, _) = rx.await.unwrap().unwrap();
+		let msg = BitswapProtoMessage::decode(payload.as_slice()).unwrap();
+		assert_eq!(msg.payload.len(), 1);
+		assert_eq!(msg.payload[0].data, data);
+		assert!(pending.is_empty());
+	}
+
+	#[tokio::test]
+	async fn pending_batch_accepts_keccak_response_for_blake_wantlist() {
+		let peer = make_peer();
+		let wanted = cid_with_code(3, 0xb220);
+		let response_cid = cid_with_code(4, 0x1b);
+		let data = b"keccak-payload".to_vec();
+
+		let (tx, rx) = oneshot::channel();
+		let mut pending = PendingBatches::default();
+		pending.insert(peer, pending_batch(vec![wanted], tx, Instant::now()));
+
+		pending
+			.handle_response(peer, vec![ResponseType::Block { cid: response_cid, block: data.clone() }]);
+
+		let (payload, _) = rx.await.unwrap().unwrap();
+		let msg = BitswapProtoMessage::decode(payload.as_slice()).unwrap();
+		assert_eq!(msg.payload.len(), 1);
+		assert_eq!(msg.payload[0].data, data);
+		assert!(pending.is_empty());
+	}
+
+	#[tokio::test]
+	async fn pending_batch_preserves_response_order_across_algorithms() {
+		let peer = make_peer();
+		let wanted_a = cid_with_code(5, 0xb220);
+		let wanted_b = cid_with_code(6, 0xb220);
+		let wanted_c = cid_with_code(7, 0xb220);
+		let resp_blake = cid_with_code(5, 0xb220);
+		let resp_sha = cid_with_code(8, 0x12);
+		let resp_keccak = cid_with_code(9, 0x1b);
+		let data_a = b"position-zero".to_vec();
+		let data_b = b"position-one".to_vec();
+		let data_c = b"position-two".to_vec();
+
+		let (tx, rx) = oneshot::channel();
+		let mut pending = PendingBatches::default();
+		pending.insert(peer, pending_batch(vec![wanted_a, wanted_b, wanted_c], tx, Instant::now()));
+
+		pending.handle_response(
+			peer,
+			vec![
+				ResponseType::Block { cid: resp_blake, block: data_a.clone() },
+				ResponseType::Block { cid: resp_sha, block: data_b.clone() },
+				ResponseType::Block { cid: resp_keccak, block: data_c.clone() },
+			],
+		);
+
+		let (payload, _) = rx.await.unwrap().unwrap();
+		let msg = BitswapProtoMessage::decode(payload.as_slice()).unwrap();
+		assert_eq!(msg.payload.len(), 3);
+		assert_eq!(msg.payload[0].data, data_a);
+		assert_eq!(msg.payload[1].data, data_b);
+		assert_eq!(msg.payload[2].data, data_c);
+		assert!(pending.is_empty());
+	}
+
+	#[tokio::test]
+	async fn pending_batch_caps_responses_at_wantlist_size() {
+		let peer = make_peer();
+		let wanted = cid_with_code(10, 0xb220);
+
+		let (tx, rx) = oneshot::channel();
+		let mut pending = PendingBatches::default();
+		pending.insert(peer, pending_batch(vec![wanted], tx, Instant::now()));
+
+		pending.handle_response(
+			peer,
+			vec![
+				ResponseType::Block { cid: cid_with_code(11, 0xb220), block: b"first".to_vec() },
+				ResponseType::Block { cid: cid_with_code(12, 0xb220), block: b"extra".to_vec() },
+			],
+		);
+
+		let (payload, _) = rx.await.unwrap().unwrap();
+		let msg = BitswapProtoMessage::decode(payload.as_slice()).unwrap();
+		assert_eq!(msg.payload.len(), 1);
+		assert_eq!(msg.payload[0].data, b"first");
 	}
 }
