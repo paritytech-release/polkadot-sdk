@@ -1286,6 +1286,26 @@ impl<Block: BlockT> Backend<Block> {
 	) -> Self {
 		let db = kvdb_memorydb::create(crate::utils::NUM_COLUMNS);
 		let db = sp_database::as_database(db);
+		Self::new_test_with_tx_storage_source(
+			blocks_pruning,
+			canonicalization_delay,
+			DatabaseSource::Custom { db, require_create_flag: true },
+			pruning_filters,
+		)
+	}
+
+	/// Create a new client backend for tests, parameterised by `DatabaseSource`.
+	///
+	/// Useful for running the same scenario against multiple backend implementations
+	/// (kvdb-memorydb, kvdb-rocksdb on disk, parity-db on disk). See the existing
+	/// `new_test_with_tx_storage_and_filters` for the kvdb-memorydb-backed default.
+	#[cfg(any(test, feature = "test-helpers"))]
+	pub fn new_test_with_tx_storage_source(
+		blocks_pruning: BlocksPruning,
+		canonicalization_delay: u64,
+		source: DatabaseSource,
+		pruning_filters: Vec<Arc<dyn PruningFilter>>,
+	) -> Self {
 		let state_pruning = match blocks_pruning {
 			BlocksPruning::KeepAll => PruningMode::ArchiveAll,
 			BlocksPruning::KeepFinalized => PruningMode::ArchiveCanonical,
@@ -1294,7 +1314,7 @@ impl<Block: BlockT> Backend<Block> {
 		let db_setting = DatabaseSettings {
 			trie_cache_maximum_size: Some(16 * 1024 * 1024),
 			state_pruning: Some(state_pruning),
-			source: DatabaseSource::Custom { db, require_create_flag: true },
+			source,
 			blocks_pruning,
 			pruning_filters,
 			metrics_registry: None,
@@ -6932,6 +6952,866 @@ pub(crate) mod tests {
 			assert!(!encoded_body_index.is_empty());
 			assert_eq!(missing.len(), 1);
 			assert_eq!(missing[0], [0u8; 32]);
+		}
+	}
+
+	mod indexed_transaction_backend_tests {
+		use super::*;
+		use crate::utils::NUM_COLUMNS;
+		use sp_database::Transaction as DbTransaction;
+		use std::sync::Arc;
+		use tempfile::TempDir;
+
+		fn open_memdb_database() -> Arc<dyn Database<DbHash>> {
+			sp_database::as_database(kvdb_memorydb::create(NUM_COLUMNS))
+		}
+
+		fn open_paritydb_database(path: &std::path::Path) -> Arc<dyn Database<DbHash>> {
+			crate::parity_db::open::<DbHash>(path, DatabaseType::Full, true, false)
+				.expect("parity-db open succeeds in test")
+		}
+
+		fn open_rocksdb_database(path: &std::path::Path) -> Arc<dyn Database<DbHash>> {
+			let mut cfg = kvdb_rocksdb::DatabaseConfig::with_columns(NUM_COLUMNS);
+			cfg.create_if_missing = true;
+			let db = kvdb_rocksdb::Database::open(&cfg, path)
+				.expect("kvdb-rocksdb open succeeds in test");
+			sp_database::as_database(db)
+		}
+
+		fn make_memdb_backend(blocks_pruning: BlocksPruning) -> Backend<Block> {
+			Backend::new_test_with_tx_storage(blocks_pruning, 10)
+		}
+
+		fn make_paritydb_backend(
+			path: &std::path::Path,
+			blocks_pruning: BlocksPruning,
+		) -> Backend<Block> {
+			Backend::new_test_with_tx_storage_source(
+				blocks_pruning,
+				10,
+				DatabaseSource::ParityDb { path: path.to_path_buf() },
+				Default::default(),
+			)
+		}
+
+		fn make_rocksdb_backend(
+			path: &std::path::Path,
+			blocks_pruning: BlocksPruning,
+		) -> Backend<Block> {
+			let db = open_rocksdb_database(path);
+			Backend::new_test_with_tx_storage_source(
+				blocks_pruning,
+				10,
+				DatabaseSource::Custom { db, require_create_flag: true },
+				Default::default(),
+			)
+		}
+
+		type OpenDb<'a> = dyn Fn() -> Arc<dyn Database<DbHash>> + 'a;
+
+		fn run_with_memdb_db<F: FnOnce(&OpenDb<'_>)>(f: F) {
+			let db = open_memdb_database();
+			f(&|| db.clone());
+		}
+
+		fn run_with_paritydb_db<F: FnOnce(&OpenDb<'_>)>(f: F) {
+			let tmp = TempDir::new().unwrap();
+			let path = tmp.path().to_path_buf();
+			f(&|| open_paritydb_database(&path));
+		}
+
+		fn run_with_rocksdb_db<F: FnOnce(&OpenDb<'_>)>(f: F) {
+			let tmp = TempDir::new().unwrap();
+			let path = tmp.path().to_path_buf();
+			f(&|| open_rocksdb_database(&path));
+		}
+
+		fn run_with_paritydb_backend<F: FnOnce(Backend<Block>)>(
+			blocks_pruning: BlocksPruning,
+			f: F,
+		) {
+			let tmp = TempDir::new().unwrap();
+			f(make_paritydb_backend(tmp.path(), blocks_pruning));
+		}
+
+		fn run_with_rocksdb_backend<F: FnOnce(Backend<Block>)>(
+			blocks_pruning: BlocksPruning,
+			f: F,
+		) {
+			let tmp = TempDir::new().unwrap();
+			f(make_rocksdb_backend(tmp.path(), blocks_pruning));
+		}
+
+		const TEST_COL: u32 = columns::TRANSACTION;
+
+		fn hash(seed: u8) -> DbHash {
+			DbHash::repeat_byte(seed)
+		}
+
+		fn commit_store(open_db: &OpenDb<'_>, h: DbHash, bytes: Vec<u8>) {
+			let db = open_db();
+			let mut tx = DbTransaction::new();
+			tx.store(TEST_COL, h, bytes);
+			db.commit(tx).unwrap();
+		}
+
+		fn commit_reference(open_db: &OpenDb<'_>, h: DbHash) {
+			let db = open_db();
+			let mut tx = DbTransaction::new();
+			tx.reference(TEST_COL, h);
+			db.commit(tx).unwrap();
+		}
+
+		fn commit_release(open_db: &OpenDb<'_>, h: DbHash) {
+			let db = open_db();
+			let mut tx = DbTransaction::new();
+			tx.release(TEST_COL, h);
+			db.commit(tx).unwrap();
+		}
+
+		fn get_value(open_db: &OpenDb<'_>, h: DbHash) -> Option<Vec<u8>> {
+			let db = open_db();
+			db.get(TEST_COL, h.as_ref())
+		}
+
+		fn check_a1_store_then_get(open_db: &OpenDb<'_>) {
+			let h = hash(0xA1);
+			let bytes = b"a1-bytes".to_vec();
+			commit_store(open_db, h, bytes.clone());
+			assert_eq!(get_value(open_db, h).as_deref(), Some(bytes.as_slice()));
+		}
+
+		#[test]
+		fn a1_store_then_get_memdb() {
+			run_with_memdb_db(check_a1_store_then_get);
+		}
+		#[test]
+		fn a1_store_then_get_paritydb() {
+			run_with_paritydb_db(check_a1_store_then_get);
+		}
+		#[test]
+		fn a1_store_then_get_rocksdb() {
+			run_with_rocksdb_db(check_a1_store_then_get);
+		}
+
+		fn check_a2_store_then_release_separate_commits(open_db: &OpenDb<'_>) {
+			let h = hash(0xA2);
+			let bytes = b"a2-bytes".to_vec();
+			commit_store(open_db, h, bytes.clone());
+			assert!(get_value(open_db, h).is_some(), "present after store");
+			commit_release(open_db, h);
+			assert!(get_value(open_db, h).is_none(), "gone after release");
+		}
+
+		#[test]
+		fn a2_store_release_separate_commits_memdb() {
+			run_with_memdb_db(check_a2_store_then_release_separate_commits);
+		}
+		#[test]
+		fn a2_store_release_separate_commits_paritydb() {
+			run_with_paritydb_db(check_a2_store_then_release_separate_commits);
+		}
+		#[test]
+		fn a2_store_release_separate_commits_rocksdb() {
+			run_with_rocksdb_db(check_a2_store_then_release_separate_commits);
+		}
+
+		fn check_a3_store_reference_release_release_separate_commits(open_db: &OpenDb<'_>) {
+			let h = hash(0xA3);
+			let bytes = b"a3-bytes".to_vec();
+			commit_store(open_db, h, bytes);
+			commit_reference(open_db, h);
+			assert!(get_value(open_db, h).is_some(), "rc=2 after reference");
+			commit_release(open_db, h);
+			assert!(get_value(open_db, h).is_some(), "rc=1 still present");
+			commit_release(open_db, h);
+			assert!(get_value(open_db, h).is_none(), "rc=0 removed");
+		}
+
+		#[test]
+		fn a3_store_reference_release_release_separate_commits_memdb() {
+			run_with_memdb_db(check_a3_store_reference_release_release_separate_commits);
+		}
+		#[test]
+		fn a3_store_reference_release_release_separate_commits_paritydb() {
+			run_with_paritydb_db(check_a3_store_reference_release_release_separate_commits);
+		}
+		#[test]
+		fn a3_store_reference_release_release_separate_commits_rocksdb() {
+			run_with_rocksdb_db(check_a3_store_reference_release_release_separate_commits);
+		}
+
+		fn check_a4_store_then_reference_same_commit_keeps_value(open_db: &OpenDb<'_>) {
+			let h = hash(0xA4);
+			let bytes = b"a4-bytes".to_vec();
+			{
+				let db = open_db();
+				let mut tx = DbTransaction::new();
+				tx.store(TEST_COL, h, bytes.clone());
+				tx.reference(TEST_COL, h);
+				db.commit(tx).unwrap();
+			}
+			assert_eq!(
+				get_value(open_db, h).as_deref(),
+				Some(bytes.as_slice()),
+				"Store + Reference on fresh hash in a single commit must keep the value \
+				 (observed via fresh DB handle so overlay caching is bypassed)",
+			);
+		}
+
+		#[test]
+		fn a4_store_then_reference_same_commit_keeps_value_memdb() {
+			run_with_memdb_db(check_a4_store_then_reference_same_commit_keeps_value);
+		}
+		#[test]
+		fn a4_store_then_reference_same_commit_keeps_value_paritydb() {
+			run_with_paritydb_db(check_a4_store_then_reference_same_commit_keeps_value);
+		}
+		#[test]
+		fn a4_store_then_reference_same_commit_keeps_value_rocksdb() {
+			run_with_rocksdb_db(check_a4_store_then_reference_same_commit_keeps_value);
+		}
+
+		fn check_a5_store_then_two_references_same_commit_keeps_value(open_db: &OpenDb<'_>) {
+			let h = hash(0xA5);
+			let bytes = b"a5-bytes".to_vec();
+			{
+				let db = open_db();
+				let mut tx = DbTransaction::new();
+				tx.store(TEST_COL, h, bytes.clone());
+				tx.reference(TEST_COL, h);
+				tx.reference(TEST_COL, h);
+				db.commit(tx).unwrap();
+			}
+			assert_eq!(
+				get_value(open_db, h).as_deref(),
+				Some(bytes.as_slice()),
+				"Store + 2x Reference on fresh hash must keep the value (post-sync observation)",
+			);
+		}
+
+		#[test]
+		fn a5_store_then_two_references_same_commit_keeps_value_memdb() {
+			run_with_memdb_db(check_a5_store_then_two_references_same_commit_keeps_value);
+		}
+		#[test]
+		fn a5_store_then_two_references_same_commit_keeps_value_paritydb() {
+			run_with_paritydb_db(check_a5_store_then_two_references_same_commit_keeps_value);
+		}
+		#[test]
+		fn a5_store_then_two_references_same_commit_keeps_value_rocksdb() {
+			run_with_rocksdb_db(check_a5_store_then_two_references_same_commit_keeps_value);
+		}
+
+		fn check_a6_reference_on_missing_hash_is_noop(open_db: &OpenDb<'_>) {
+			let h = hash(0xA6);
+			commit_reference(open_db, h);
+			assert!(
+				get_value(open_db, h).is_none(),
+				"reference on missing key is a no-op",
+			);
+			let bytes = b"a6-bytes".to_vec();
+			commit_store(open_db, h, bytes.clone());
+			assert_eq!(get_value(open_db, h).as_deref(), Some(bytes.as_slice()));
+			commit_release(open_db, h);
+			assert!(
+				get_value(open_db, h).is_none(),
+				"single release balances the store",
+			);
+		}
+
+		#[test]
+		fn a6_reference_on_missing_hash_is_noop_memdb() {
+			run_with_memdb_db(check_a6_reference_on_missing_hash_is_noop);
+		}
+		#[test]
+		fn a6_reference_on_missing_hash_is_noop_paritydb() {
+			run_with_paritydb_db(check_a6_reference_on_missing_hash_is_noop);
+		}
+		#[test]
+		fn a6_reference_on_missing_hash_is_noop_rocksdb() {
+			run_with_rocksdb_db(check_a6_reference_on_missing_hash_is_noop);
+		}
+
+		fn check_a7_release_on_missing_hash_is_noop(open_db: &OpenDb<'_>) {
+			let h = hash(0xA7);
+			commit_release(open_db, h);
+			assert!(
+				get_value(open_db, h).is_none(),
+				"release on missing key is a no-op",
+			);
+			let bytes = b"a7-bytes".to_vec();
+			commit_store(open_db, h, bytes.clone());
+			assert_eq!(get_value(open_db, h).as_deref(), Some(bytes.as_slice()));
+		}
+
+		#[test]
+		fn a7_release_on_missing_hash_is_noop_memdb() {
+			run_with_memdb_db(check_a7_release_on_missing_hash_is_noop);
+		}
+		#[test]
+		fn a7_release_on_missing_hash_is_noop_paritydb() {
+			run_with_paritydb_db(check_a7_release_on_missing_hash_is_noop);
+		}
+		#[test]
+		fn a7_release_on_missing_hash_is_noop_rocksdb() {
+			run_with_rocksdb_db(check_a7_release_on_missing_hash_is_noop);
+		}
+
+		fn check_b1_prefetched_renew_creates_transaction_entry_atomically(
+			backend: Backend<Block>,
+		) {
+			let payload = b"prefetched-blob-B1".to_vec();
+			let payload_hash =
+				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			let block0 = insert_block_with_prefetched(
+				&backend,
+				0,
+				Default::default(),
+				Default::default(),
+				vec![UncheckedXt::new_transaction(0.into(), ())],
+				Some(vec![IndexOperation::Renew {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+				}]),
+				vec![(payload_hash_arr, payload.clone())],
+			)
+			.unwrap();
+
+			let bc = backend.blockchain();
+			assert_eq!(
+				bc.indexed_transaction(payload_hash).unwrap().as_deref(),
+				Some(payload.as_slice()),
+				"prefetched bytes must be readable via indexed_transaction after commit",
+			);
+			let body = bc.block_indexed_body(block0).unwrap().unwrap();
+			assert_eq!(body.len(), 1);
+			assert_eq!(body[0], payload);
+		}
+
+		#[test]
+		fn b1_prefetched_renew_creates_transaction_entry_atomically_memdb() {
+			check_b1_prefetched_renew_creates_transaction_entry_atomically(make_memdb_backend(
+				BlocksPruning::Some(2),
+			));
+		}
+		#[test]
+		fn b1_prefetched_renew_creates_transaction_entry_atomically_paritydb() {
+			run_with_paritydb_backend(
+				BlocksPruning::Some(2),
+				check_b1_prefetched_renew_creates_transaction_entry_atomically,
+			);
+		}
+		#[test]
+		fn b1_prefetched_renew_creates_transaction_entry_atomically_rocksdb() {
+			run_with_rocksdb_backend(
+				BlocksPruning::Some(2),
+				check_b1_prefetched_renew_creates_transaction_entry_atomically,
+			);
+		}
+
+		fn check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle(
+			backend: Backend<Block>,
+		) {
+			let payload = b"prefetched-blob-B2".to_vec();
+			let payload_hash =
+				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			let mut blocks = Vec::new();
+			let block0 = insert_block_with_prefetched(
+				&backend,
+				0,
+				Default::default(),
+				Default::default(),
+				vec![UncheckedXt::new_transaction(0.into(), ())],
+				Some(vec![
+					IndexOperation::Renew {
+						extrinsic: 0,
+						hash: payload_hash_arr.to_vec(),
+					},
+					IndexOperation::Renew {
+						extrinsic: 0,
+						hash: payload_hash_arr.to_vec(),
+					},
+				]),
+				vec![(payload_hash_arr, payload.clone())],
+			)
+			.unwrap();
+			blocks.push(block0);
+
+			assert!(backend.blockchain().indexed_transaction(payload_hash).unwrap().is_some());
+
+			let mut prev = block0;
+			for i in 1..6u64 {
+				prev = insert_block(
+					&backend,
+					i,
+					prev,
+					None,
+					Default::default(),
+					vec![UncheckedXt::new_transaction(i.into(), ())],
+					None,
+				)
+				.unwrap();
+				blocks.push(prev);
+			}
+
+			for i in 1..6 {
+				let mut op = backend.begin_operation().unwrap();
+				backend.begin_state_operation(&mut op, blocks[4]).unwrap();
+				op.mark_finalized(blocks[i], None).unwrap();
+				backend.commit_operation(op).unwrap();
+			}
+
+			assert!(
+				backend.blockchain().indexed_transaction(payload_hash).unwrap().is_none(),
+				"prefetched data should be pruned once the only referencing block falls out",
+			);
+		}
+
+		#[test]
+		fn b2_prefetched_multi_renew_same_hash_balanced_lifecycle_memdb() {
+			check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle(make_memdb_backend(
+				BlocksPruning::Some(2),
+			));
+		}
+		#[test]
+		fn b2_prefetched_multi_renew_same_hash_balanced_lifecycle_paritydb() {
+			run_with_paritydb_backend(
+				BlocksPruning::Some(2),
+				check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle,
+			);
+		}
+		#[test]
+		fn b2_prefetched_multi_renew_same_hash_balanced_lifecycle_rocksdb() {
+			run_with_rocksdb_backend(
+				BlocksPruning::Some(2),
+				check_b2_prefetched_multi_renew_same_hash_balanced_lifecycle,
+			);
+		}
+
+		fn check_b3_prefetched_renew_with_existing_data_keeps_value(
+			backend: Backend<Block>,
+		) {
+			let payload_xt = UncheckedXt::new_transaction(7.into(), ()).encode();
+			let payload = payload_xt[1..].to_vec();
+			let payload_hash =
+				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			let block0 = insert_block(
+				&backend,
+				0,
+				Default::default(),
+				None,
+				Default::default(),
+				vec![UncheckedXt::new_transaction(7.into(), ())],
+				Some(vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+					size: payload.len() as u32,
+				}]),
+			)
+			.unwrap();
+
+			assert!(backend.blockchain().indexed_transaction(payload_hash).unwrap().is_some());
+
+			let block1 = insert_block_with_prefetched(
+				&backend,
+				1,
+				block0,
+				Default::default(),
+				vec![UncheckedXt::new_transaction(99.into(), ())],
+				Some(vec![IndexOperation::Renew {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+				}]),
+				vec![(payload_hash_arr, payload.clone())],
+			)
+			.unwrap();
+
+			let bc = backend.blockchain();
+			assert_eq!(
+				bc.indexed_transaction(payload_hash).unwrap().as_deref(),
+				Some(payload.as_slice()),
+				"data must remain after redundant prefetch on already-local hash",
+			);
+			let body = bc.block_indexed_body(block1).unwrap().unwrap();
+			assert_eq!(body.len(), 1);
+			assert_eq!(body[0], payload);
+		}
+
+		#[test]
+		fn b3_prefetched_renew_with_existing_data_keeps_value_memdb() {
+			check_b3_prefetched_renew_with_existing_data_keeps_value(make_memdb_backend(
+				BlocksPruning::Some(10),
+			));
+		}
+		#[test]
+		fn b3_prefetched_renew_with_existing_data_keeps_value_paritydb() {
+			run_with_paritydb_backend(
+				BlocksPruning::Some(10),
+				check_b3_prefetched_renew_with_existing_data_keeps_value,
+			);
+		}
+		#[test]
+		fn b3_prefetched_renew_with_existing_data_keeps_value_rocksdb() {
+			run_with_rocksdb_backend(
+				BlocksPruning::Some(10),
+				check_b3_prefetched_renew_with_existing_data_keeps_value,
+			);
+		}
+
+		fn check_b4_prefetched_single_renew_full_lifecycle_through_prune(
+			backend: Backend<Block>,
+		) {
+			let payload = b"prefetched-blob-B4".to_vec();
+			let payload_hash =
+				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			let mut blocks = Vec::new();
+			let block0 = insert_block_with_prefetched(
+				&backend,
+				0,
+				Default::default(),
+				Default::default(),
+				vec![UncheckedXt::new_transaction(0.into(), ())],
+				Some(vec![IndexOperation::Renew {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+				}]),
+				vec![(payload_hash_arr, payload.clone())],
+			)
+			.unwrap();
+			blocks.push(block0);
+
+			assert_eq!(
+				backend.blockchain().indexed_transaction(payload_hash).unwrap().as_deref(),
+				Some(payload.as_slice()),
+				"prefetched data accessible immediately after import",
+			);
+
+			let mut prev = block0;
+			for i in 1..6u64 {
+				prev = insert_block(
+					&backend,
+					i,
+					prev,
+					None,
+					Default::default(),
+					vec![UncheckedXt::new_transaction(i.into(), ())],
+					None,
+				)
+				.unwrap();
+				blocks.push(prev);
+			}
+
+			for i in 1..6 {
+				let mut op = backend.begin_operation().unwrap();
+				backend.begin_state_operation(&mut op, blocks[4]).unwrap();
+				op.mark_finalized(blocks[i], None).unwrap();
+				backend.commit_operation(op).unwrap();
+			}
+
+			assert!(
+				backend.blockchain().indexed_transaction(payload_hash).unwrap().is_none(),
+				"single-renew prefetched data must be fully released after retention exit",
+			);
+		}
+
+		#[test]
+		fn b4_prefetched_single_renew_full_lifecycle_memdb() {
+			check_b4_prefetched_single_renew_full_lifecycle_through_prune(make_memdb_backend(
+				BlocksPruning::Some(2),
+			));
+		}
+		#[test]
+		fn b4_prefetched_single_renew_full_lifecycle_paritydb() {
+			run_with_paritydb_backend(
+				BlocksPruning::Some(2),
+				check_b4_prefetched_single_renew_full_lifecycle_through_prune,
+			);
+		}
+		#[test]
+		fn b4_prefetched_single_renew_full_lifecycle_rocksdb() {
+			run_with_rocksdb_backend(
+				BlocksPruning::Some(2),
+				check_b4_prefetched_single_renew_full_lifecycle_through_prune,
+			);
+		}
+
+		fn check_b5_redundant_prefetch_on_local_data_balanced_lifecycle(
+			backend: Backend<Block>,
+		) {
+			let payload_xt = UncheckedXt::new_transaction(5.into(), ()).encode();
+			let payload = payload_xt[1..].to_vec();
+			let payload_hash =
+				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			let mut blocks = Vec::new();
+			let block0 = insert_block(
+				&backend,
+				0,
+				Default::default(),
+				None,
+				Default::default(),
+				vec![UncheckedXt::new_transaction(5.into(), ())],
+				Some(vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+					size: payload.len() as u32,
+				}]),
+			)
+			.unwrap();
+			blocks.push(block0);
+
+			let block1 = insert_block_with_prefetched(
+				&backend,
+				1,
+				block0,
+				Default::default(),
+				vec![UncheckedXt::new_transaction(99.into(), ())],
+				Some(vec![IndexOperation::Renew {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+				}]),
+				vec![(payload_hash_arr, payload.clone())],
+			)
+			.unwrap();
+			blocks.push(block1);
+
+			assert!(backend.blockchain().indexed_transaction(payload_hash).unwrap().is_some());
+
+			let mut prev = block1;
+			for i in 2..7u64 {
+				prev = insert_block(
+					&backend,
+					i,
+					prev,
+					None,
+					Default::default(),
+					vec![UncheckedXt::new_transaction(i.into(), ())],
+					None,
+				)
+				.unwrap();
+				blocks.push(prev);
+			}
+
+			for i in 1..7 {
+				let mut op = backend.begin_operation().unwrap();
+				backend.begin_state_operation(&mut op, blocks[5]).unwrap();
+				op.mark_finalized(blocks[i], None).unwrap();
+				backend.commit_operation(op).unwrap();
+			}
+
+			assert!(
+				backend.blockchain().indexed_transaction(payload_hash).unwrap().is_none(),
+				"redundant prefetch must not leak refcount through prune",
+			);
+		}
+
+		#[test]
+		fn b5_redundant_prefetch_on_local_data_balanced_lifecycle_memdb() {
+			check_b5_redundant_prefetch_on_local_data_balanced_lifecycle(make_memdb_backend(
+				BlocksPruning::Some(2),
+			));
+		}
+		#[test]
+		fn b5_redundant_prefetch_on_local_data_balanced_lifecycle_paritydb() {
+			run_with_paritydb_backend(
+				BlocksPruning::Some(2),
+				check_b5_redundant_prefetch_on_local_data_balanced_lifecycle,
+			);
+		}
+		#[test]
+		fn b5_redundant_prefetch_on_local_data_balanced_lifecycle_rocksdb() {
+			run_with_rocksdb_backend(
+				BlocksPruning::Some(2),
+				check_b5_redundant_prefetch_on_local_data_balanced_lifecycle,
+			);
+		}
+
+		fn check_b6_same_block_insert_and_renew_different_indices_with_prefetch(
+			backend: Backend<Block>,
+		) {
+			let x_xt = UncheckedXt::new_transaction(0.into(), ()).encode();
+			let x = x_xt[1..].to_vec();
+			let x_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&x);
+			let x_hash_arr: [u8; 32] = x_hash.into();
+
+			let mut blocks = Vec::new();
+
+			let block0 = insert_block(
+				&backend,
+				0,
+				Default::default(),
+				None,
+				Default::default(),
+				vec![UncheckedXt::new_transaction(0.into(), ())],
+				Some(vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: x_hash_arr.to_vec(),
+					size: x.len() as u32,
+				}]),
+			)
+			.unwrap();
+			blocks.push(block0);
+
+			let block1 = insert_block_with_prefetched(
+				&backend,
+				1,
+				block0,
+				Default::default(),
+				vec![
+					UncheckedXt::new_transaction(0.into(), ()),
+					UncheckedXt::new_transaction(99.into(), ()),
+				],
+				Some(vec![
+					IndexOperation::Insert {
+						extrinsic: 0,
+						hash: x_hash_arr.to_vec(),
+						size: x.len() as u32,
+					},
+					IndexOperation::Renew { extrinsic: 1, hash: x_hash_arr.to_vec() },
+				]),
+				vec![(x_hash_arr, x.clone())],
+			)
+			.unwrap();
+			blocks.push(block1);
+
+			assert!(backend.blockchain().indexed_transaction(x_hash).unwrap().is_some());
+
+			let mut prev = block1;
+			for i in 2..8u64 {
+				prev = insert_block(
+					&backend,
+					i,
+					prev,
+					None,
+					Default::default(),
+					vec![UncheckedXt::new_transaction(i.into(), ())],
+					None,
+				)
+				.unwrap();
+				blocks.push(prev);
+			}
+
+			for i in 1..8 {
+				let mut op = backend.begin_operation().unwrap();
+				backend.begin_state_operation(&mut op, blocks[6]).unwrap();
+				op.mark_finalized(blocks[i], None).unwrap();
+				backend.commit_operation(op).unwrap();
+			}
+
+			assert!(
+				backend.blockchain().indexed_transaction(x_hash).unwrap().is_none(),
+				"same-block Insert+Renew with prefetch must balance refcount through prune",
+			);
+		}
+
+		#[test]
+		fn b6_same_block_insert_and_renew_different_indices_with_prefetch_memdb() {
+			check_b6_same_block_insert_and_renew_different_indices_with_prefetch(
+				make_memdb_backend(BlocksPruning::Some(2)),
+			);
+		}
+		#[test]
+		fn b6_same_block_insert_and_renew_different_indices_with_prefetch_paritydb() {
+			run_with_paritydb_backend(
+				BlocksPruning::Some(2),
+				check_b6_same_block_insert_and_renew_different_indices_with_prefetch,
+			);
+		}
+		#[test]
+		fn b6_same_block_insert_and_renew_different_indices_with_prefetch_rocksdb() {
+			run_with_rocksdb_backend(
+				BlocksPruning::Some(2),
+				check_b6_same_block_insert_and_renew_different_indices_with_prefetch,
+			);
+		}
+
+		fn check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned(
+			backend: Backend<Block>,
+		) {
+			let payload = b"prefetched-blob-B7".to_vec();
+			let payload_hash =
+				<HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			let mut blocks = Vec::new();
+			let mut prev = Default::default();
+			for i in 0..4u64 {
+				let block = insert_block_with_prefetched(
+					&backend,
+					i,
+					prev,
+					Default::default(),
+					vec![UncheckedXt::new_transaction(i.into(), ())],
+					Some(vec![IndexOperation::Renew {
+						extrinsic: 0,
+						hash: payload_hash_arr.to_vec(),
+					}]),
+					vec![(payload_hash_arr, payload.clone())],
+				)
+				.unwrap();
+				blocks.push(block);
+				prev = block;
+			}
+
+			assert!(backend.blockchain().indexed_transaction(payload_hash).unwrap().is_some());
+
+			for i in 4..10u64 {
+				prev = insert_block(
+					&backend,
+					i,
+					prev,
+					None,
+					Default::default(),
+					vec![UncheckedXt::new_transaction(i.into(), ())],
+					None,
+				)
+				.unwrap();
+				blocks.push(prev);
+			}
+
+			for i in 1..10 {
+				let mut op = backend.begin_operation().unwrap();
+				backend.begin_state_operation(&mut op, blocks[8]).unwrap();
+				op.mark_finalized(blocks[i], None).unwrap();
+				backend.commit_operation(op).unwrap();
+			}
+
+			assert!(
+				backend.blockchain().indexed_transaction(payload_hash).unwrap().is_none(),
+				"sequential prefetched renews must all release through prune",
+			);
+		}
+
+		#[test]
+		fn b7_sequential_renew_blocks_all_prefetched_eventually_pruned_memdb() {
+			check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned(make_memdb_backend(
+				BlocksPruning::Some(2),
+			));
+		}
+		#[test]
+		fn b7_sequential_renew_blocks_all_prefetched_eventually_pruned_paritydb() {
+			run_with_paritydb_backend(
+				BlocksPruning::Some(2),
+				check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned,
+			);
+		}
+		#[test]
+		fn b7_sequential_renew_blocks_all_prefetched_eventually_pruned_rocksdb() {
+			run_with_rocksdb_backend(
+				BlocksPruning::Some(2),
+				check_b7_sequential_renew_blocks_all_prefetched_eventually_pruned,
+			);
 		}
 	}
 }
