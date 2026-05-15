@@ -1709,7 +1709,7 @@ impl<Block: BlockT> Backend<Block> {
 						&mut transaction,
 						body,
 						operation.index_ops,
-						&operation.prefetched_indexed_transactions,
+						operation.prefetched_indexed_transactions,
 					);
 					transaction.set_from_vec(columns::BODY_INDEX, &lookup_key, body);
 				}
@@ -2269,7 +2269,7 @@ fn apply_index_ops<Block: BlockT>(
 	transaction: &mut Transaction<DbHash>,
 	body: Vec<Block::Extrinsic>,
 	ops: Vec<IndexOperation>,
-	prefetched: &HashMap<DbHash, Vec<u8>>,
+	mut prefetched: HashMap<DbHash, Vec<u8>>,
 ) -> Vec<u8> {
 	let mut extrinsic_index: Vec<DbExtrinsic<Block>> = Vec::with_capacity(body.len());
 	let mut index_map = HashMap::new();
@@ -2289,21 +2289,18 @@ fn apply_index_ops<Block: BlockT>(
 			},
 		}
 	}
-	// One bump per renew occurrence: Store if it's the first occurrence with
-	// prefetched bytes, Reference otherwise. Matches one Release per occurrence
-	// at prune. Emitting both leaks refcount on parity-db.
-	let mut prefetched_stored: HashSet<DbHash> = HashSet::new();
-	let process_renew_occurrence =
-		|tx: &mut Transaction<DbHash>, stored: &mut HashSet<DbHash>, hash: DbHash| {
-			if !stored.contains(&hash) {
-				if let Some(bytes) = prefetched.get(&hash) {
-					tx.store(columns::TRANSACTION, hash, bytes.clone());
-					stored.insert(hash);
-					return;
-				}
-			}
+	// First occurrence consumes the prefetched bytes via `remove`, becoming a
+	// Store; every subsequent occurrence misses and falls through to Reference.
+	// One bump per renew occurrence matches one Release per occurrence at prune;
+	// emitting both Store and Reference for the same hash leaks refcount on
+	// parity-db.
+	let mut process_renew_occurrence = |tx: &mut Transaction<DbHash>, hash: DbHash| {
+		if let Some(bytes) = prefetched.remove(&hash) {
+			tx.store(columns::TRANSACTION, hash, bytes);
+		} else {
 			tx.reference(columns::TRANSACTION, hash);
-		};
+		}
+	};
 	let mut n_inserted = 0usize;
 	let mut n_renew_slots = 0usize;
 	let mut n_renew_hashes = 0usize;
@@ -2316,12 +2313,12 @@ fn apply_index_ops<Block: BlockT>(
 			if hashes.len() == 1 {
 				// Single renewal: backwards-compatible Indexed variant
 				let hash = hashes[0];
-				process_renew_occurrence(transaction, &mut prefetched_stored, hash);
+				process_renew_occurrence(transaction, hash);
 				DbExtrinsic::Indexed { hash, header: encoded }
 			} else {
 				// Multi-renewal: bump ref counter for each hash
 				for hash in &hashes {
-					process_renew_occurrence(transaction, &mut prefetched_stored, *hash);
+					process_renew_occurrence(transaction, *hash);
 				}
 				DbExtrinsic::MultiRenew { hashes, extrinsic: encoded }
 			}
@@ -5369,12 +5366,12 @@ pub(crate) mod tests {
 			IndexOperation::Renew { extrinsic: 1, hash: h3.clone() },
 		];
 
-		let prefetched = HashMap::new();
 		let mut tx1: Transaction<DbHash> = Transaction::new();
-		let bytes1 = apply_index_ops::<Block>(&mut tx1, body.clone(), ops.clone(), &prefetched);
+		let bytes1 =
+			apply_index_ops::<Block>(&mut tx1, body.clone(), ops.clone(), HashMap::new());
 
 		let mut tx2: Transaction<DbHash> = Transaction::new();
-		let bytes2 = apply_index_ops::<Block>(&mut tx2, body, ops, &prefetched);
+		let bytes2 = apply_index_ops::<Block>(&mut tx2, body, ops, HashMap::new());
 
 		assert_eq!(bytes1, bytes2);
 
