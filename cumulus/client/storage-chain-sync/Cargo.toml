@@ -34,6 +34,7 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 prost = { workspace = true }
+rstest = { workspace = true }
 sc-network = { workspace = true, default-features = true, features = ["test-helpers"] }
 sp-core = { workspace = true, default-features = true }
 sp-crypto-hashing = { workspace = true, default-features = true }

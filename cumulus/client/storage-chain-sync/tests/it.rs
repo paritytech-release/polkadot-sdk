@@ -16,36 +16,23 @@ use mock::{
 	case_a_params, install_log_capture, intermediate_attached, make_harness, params_with_origin,
 	renew_op,
 };
+use rstest::rstest;
 use sc_consensus::{BlockImport, ImportResult};
 use sp_consensus::BlockOrigin;
+use sp_runtime::OpaqueExtrinsic;
 use sp_transaction_storage_proof::ContentHash;
 
+#[rstest]
+#[case::warp_sync(BlockOrigin::WarpSync, None)]
+#[case::gap_sync(BlockOrigin::GapSync, Some(Vec::new()))]
+#[case::body_none(BlockOrigin::NetworkBroadcast, None)]
 #[tokio::test]
-async fn import_passes_through_for_warp_sync() {
+async fn import_passes_through(
+	#[case] origin: BlockOrigin,
+	#[case] body: Option<Vec<OpaqueExtrinsic>>,
+) {
 	let h = make_harness();
-	let params = params_with_origin(BlockOrigin::WarpSync, 1, None);
-	let result = h.wrapper.import_block(params).await.expect("import_block");
-	assert!(matches!(result, ImportResult::Imported(_)));
-	let captured = h.captured.lock().unwrap();
-	assert_eq!(captured.len(), 1);
-	assert!(!intermediate_attached(&captured[0]));
-}
-
-#[tokio::test]
-async fn import_passes_through_for_gap_sync() {
-	let h = make_harness();
-	let params = params_with_origin(BlockOrigin::GapSync, 1, Some(Vec::new()));
-	let result = h.wrapper.import_block(params).await.expect("import_block");
-	assert!(matches!(result, ImportResult::Imported(_)));
-	let captured = h.captured.lock().unwrap();
-	assert_eq!(captured.len(), 1);
-	assert!(!intermediate_attached(&captured[0]));
-}
-
-#[tokio::test]
-async fn import_passes_through_when_body_none() {
-	let h = make_harness();
-	let params = params_with_origin(BlockOrigin::NetworkBroadcast, 1, None);
+	let params = params_with_origin(origin, 1, body);
 	let result = h.wrapper.import_block(params).await.expect("import_block");
 	assert!(matches!(result, ImportResult::Imported(_)));
 	let captured = h.captured.lock().unwrap();
@@ -64,54 +51,27 @@ async fn import_case_a_no_renews_attaches_nothing() {
 	assert!(!intermediate_attached(&captured[0]));
 }
 
+#[rstest]
+#[case::blake2b(
+	b"renew-blob-payload".as_slice(),
+	sp_transaction_storage_proof::HashingAlgorithm::Blake2b256,
+)]
+#[case::sha2(
+	b"sha2-renew-blob-payload".as_slice(),
+	sp_transaction_storage_proof::HashingAlgorithm::Sha2_256,
+)]
+#[case::keccak(
+	b"keccak-renew-blob-payload".as_slice(),
+	sp_transaction_storage_proof::HashingAlgorithm::Keccak256,
+)]
 #[tokio::test]
-async fn import_case_a_attaches_prefetched() {
+async fn import_case_a_attaches_prefetched(
+	#[case] bytes: &[u8],
+	#[case] algorithm: sp_transaction_storage_proof::HashingAlgorithm,
+) {
 	let h = make_harness();
-	let bytes = b"renew-blob-payload".to_vec();
-	let content_hash: ContentHash = sp_crypto_hashing::blake2_256(&bytes);
-	h.network.insert(content_hash, bytes.clone());
-
-	let params = case_a_params(1, vec![renew_op(content_hash, 0)]);
-	let result = h.wrapper.import_block(params).await.expect("import_block");
-	assert!(matches!(result, ImportResult::Imported(_)));
-
-	let captured = h.captured.lock().unwrap();
-	assert_eq!(captured.len(), 1);
-	let payload: &Vec<(ContentHash, Vec<u8>)> = captured[0]
-		.get_intermediate(sc_client_api::backend::PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY)
-		.expect("intermediate must be present");
-	assert_eq!(payload.len(), 1);
-	assert_eq!(payload[0].0, content_hash);
-	assert_eq!(payload[0].1, bytes);
-}
-
-#[tokio::test]
-async fn import_case_a_attaches_prefetched_sha2() {
-	let h = make_harness();
-	let bytes = b"sha2-renew-blob-payload".to_vec();
-	let content_hash: ContentHash = sp_crypto_hashing::sha2_256(&bytes);
-	h.network.insert(content_hash, bytes.clone());
-
-	let params = case_a_params(1, vec![renew_op(content_hash, 0)]);
-	let result = h.wrapper.import_block(params).await.expect("import_block");
-	assert!(matches!(result, ImportResult::Imported(_)));
-
-	let captured = h.captured.lock().unwrap();
-	assert_eq!(captured.len(), 1);
-	let payload: &Vec<(ContentHash, Vec<u8>)> = captured[0]
-		.get_intermediate(sc_client_api::backend::PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY)
-		.expect("intermediate must be present");
-	assert_eq!(payload.len(), 1);
-	assert_eq!(payload[0].0, content_hash);
-	assert_eq!(payload[0].1, bytes);
-}
-
-#[tokio::test]
-async fn import_case_a_attaches_prefetched_keccak() {
-	let h = make_harness();
-	let bytes = b"keccak-renew-blob-payload".to_vec();
-	let content_hash: ContentHash = sp_crypto_hashing::keccak_256(&bytes);
-	h.network.insert(content_hash, bytes.clone());
+	let content_hash: ContentHash = algorithm.hash(bytes);
+	h.network.insert(content_hash, bytes.to_vec());
 
 	let params = case_a_params(1, vec![renew_op(content_hash, 0)]);
 	let result = h.wrapper.import_block(params).await.expect("import_block");
