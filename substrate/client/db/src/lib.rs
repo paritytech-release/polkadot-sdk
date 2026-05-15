@@ -5362,8 +5362,7 @@ pub(crate) mod tests {
 		];
 
 		let mut tx1: Transaction<DbHash> = Transaction::new();
-		let bytes1 =
-			apply_index_ops::<Block>(&mut tx1, body.clone(), ops.clone(), HashMap::new());
+		let bytes1 = apply_index_ops::<Block>(&mut tx1, body.clone(), ops.clone(), HashMap::new());
 
 		let mut tx2: Transaction<DbHash> = Transaction::new();
 		let bytes2 = apply_index_ops::<Block>(&mut tx2, body, ops, HashMap::new());
