@@ -1,0 +1,19 @@
+# Schema: Polkadot SDK PRDoc Schema (prdoc) v1.0.0
+# See doc at https://raw.githubusercontent.com/paritytech/polkadot-sdk/master/prdoc/schema_user.json
+
+title: 'sc-client-db: add prefetched indexed transactions support'
+doc:
+- audience: Node Dev
+  description: |
+    Adds a path to pass prefetched indexed transaction data from the block import
+    pipeline to the backend, so it can be inserted into the transaction column before
+    any `IndexOperation::Renew` ops are applied. This avoids a round-trip to the
+    database when the bytes were already fetched.
+crates:
+- name: sc-client-api
+  bump: minor
+- name: sc-client-db
+  bump: minor
+- name: sc-consensus
+  bump: minor
+
