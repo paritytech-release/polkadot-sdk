@@ -605,8 +605,10 @@ mod tests {
 		let mut pending = PendingBatches::default();
 		pending.insert(peer, pending_batch(vec![wanted], tx, Instant::now()));
 
-		pending
-			.handle_response(peer, vec![ResponseType::Block { cid: response_cid, block: data.clone() }]);
+		pending.handle_response(
+			peer,
+			vec![ResponseType::Block { cid: response_cid, block: data.clone() }],
+		);
 
 		let (payload, _) = rx.await.unwrap().unwrap();
 		let msg = BitswapProtoMessage::decode(payload.as_slice()).unwrap();
@@ -626,8 +628,10 @@ mod tests {
 		let mut pending = PendingBatches::default();
 		pending.insert(peer, pending_batch(vec![wanted], tx, Instant::now()));
 
-		pending
-			.handle_response(peer, vec![ResponseType::Block { cid: response_cid, block: data.clone() }]);
+		pending.handle_response(
+			peer,
+			vec![ResponseType::Block { cid: response_cid, block: data.clone() }],
+		);
 
 		let (payload, _) = rx.await.unwrap().unwrap();
 		let msg = BitswapProtoMessage::decode(payload.as_slice()).unwrap();
