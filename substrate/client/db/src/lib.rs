@@ -77,6 +77,7 @@ use sp_core::{
 	offchain::OffchainOverlayedChange,
 	storage::{well_known_keys, ChildInfo},
 };
+use sp_crypto_hashing::blake2_256;
 use sp_database::Transaction;
 use sp_runtime::{
 	generic::BlockId,
@@ -91,7 +92,6 @@ use sp_state_machine::{
 	OffchainChangesCollection, StateMachineStats, StorageCollection, StorageIterator, StorageKey,
 	StorageValue, UsageInfo as StateUsageInfo,
 };
-use sp_transaction_storage_proof::HashingAlgorithm;
 use sp_trie::{cache::SharedTrieCache, prefixed_key, MemoryDB, MerkleValue, PrefixedMemoryDB};
 use utils::BLOCK_GAP_CURRENT_VERSION;
 
@@ -2265,23 +2265,6 @@ fn apply_state_commit(
 	}
 }
 
-/// Metadata about an indexed transaction provided by the runtime.
-///
-/// `extrinsic_index` is expected to be the concrete body position that produced this entry via
-/// `store` or `renew`. [`apply_body_with_indexed_meta`] looks entries up directly by this index
-/// and does not scan the body for entries with unknown positions.
-#[derive(Clone, Debug)]
-pub struct IndexedTransactionMeta {
-	/// Hash of the indexed bytes, as produced by `hashing`.
-	pub content_hash: [u8; 32],
-	/// Byte length of the indexed bytes.
-	pub size: u32,
-	/// Concrete body position that produced this entry.
-	pub extrinsic_index: u32,
-	/// Hash algorithm used to produce `content_hash`.
-	pub hashing: HashingAlgorithm,
-}
-
 fn apply_index_ops<Block: BlockT>(
 	transaction: &mut Transaction<DbHash>,
 	body: Vec<Block::Extrinsic>,
@@ -2383,171 +2366,9 @@ fn apply_index_ops<Block: BlockT>(
 	extrinsic_index.encode()
 }
 
-/// Classification of one body extrinsic against the indexed-transaction metadata.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ClassifiedExtrinsic {
-	/// Extrinsic carries an indexed-data payload that the backend should store on import.
-	Insert {
-		/// Content hash of the indexed payload.
-		hash: [u8; 32],
-		/// Length of the extrinsic header (everything before the indexed tail).
-		header_len: usize,
-		/// Indexed payload bytes (last `size` bytes of the encoded extrinsic).
-		tail: Vec<u8>,
-		/// Hash algorithm used to produce `hash`.
-		hashing: HashingAlgorithm,
-	},
-	/// Extrinsic renews one or more previously-indexed entries by hash.
-	Renew {
-		/// Content hashes being renewed, with their hash algorithm.
-		hashes: Vec<([u8; 32], HashingAlgorithm)>,
-	},
-	/// Extrinsic carries no indexed data.
-	Full,
-}
-
-/// Classify each extrinsic in a block body against runtime-provided indexed transaction metadata,
-/// without touching the database. Used both by [`apply_body_with_indexed_meta`] (which then emits
-/// the store ops) and by consumers that only need to know which renew hashes are missing locally
-/// (e.g. `StorageChainBlockImport`).
-///
-/// Entries are grouped by their concrete `extrinsic_index` and matched directly against
-/// `body[idx]`. Metadata whose index does not correspond to a body position is ignored by this
-/// classifier.
-pub fn classify_indexed_extrinsics<Block: BlockT>(
-	body: &[Block::Extrinsic],
-	indexed_meta: &[IndexedTransactionMeta],
-) -> Vec<ClassifiedExtrinsic> {
-	classify_by_extrinsic_index::<Block>(body, indexed_meta)
-}
-
-fn classify_by_extrinsic_index<Block: BlockT>(
-	body: &[Block::Extrinsic],
-	indexed_meta: &[IndexedTransactionMeta],
-) -> Vec<ClassifiedExtrinsic> {
-	let mut entries_at: HashMap<u32, Vec<&IndexedTransactionMeta>> = HashMap::new();
-	for meta in indexed_meta {
-		if meta.extrinsic_index == u32::MAX {
-			continue;
-		}
-		entries_at.entry(meta.extrinsic_index).or_default().push(meta);
-	}
-
-	let mut out = Vec::with_capacity(body.len());
-	for (i, ext) in body.iter().enumerate() {
-		let entries = match entries_at.get(&(i as u32)) {
-			Some(entries) => entries.as_slice(),
-			None => {
-				out.push(ClassifiedExtrinsic::Full);
-				continue;
-			},
-		};
-
-		// Multiple metas at the same extrinsic_index can only come from a multi-renew.
-		if entries.len() > 1 {
-			let hashes = entries.iter().map(|m| (m.content_hash, m.hashing)).collect();
-			out.push(ClassifiedExtrinsic::Renew { hashes });
-			continue;
-		}
-
-		let meta = entries[0];
-		let encoded = ext.encode();
-		let size = meta.size as usize;
-		if encoded.len() >= size {
-			let tail = &encoded[encoded.len() - size..];
-			if meta.hashing.hash(tail) == meta.content_hash {
-				out.push(ClassifiedExtrinsic::Insert {
-					hash: meta.content_hash,
-					header_len: encoded.len() - size,
-					tail: tail.to_vec(),
-					hashing: meta.hashing,
-				});
-				continue;
-			}
-		}
-		out.push(ClassifiedExtrinsic::Renew { hashes: vec![(meta.content_hash, meta.hashing)] });
-	}
-	out
-}
-
-/// Build BODY_INDEX from a block body and runtime-provided indexed transaction metadata, emitting
-/// `transaction.store(...)` calls for each Insert match.
-///
-/// Returns the encoded BODY_INDEX together with the content hashes whose data is missing locally
-/// (renew entries that need to be bitswap-fetched).
-pub fn apply_body_with_indexed_meta<Block: BlockT>(
-	transaction: &mut Transaction<DbHash>,
-	body: &[Block::Extrinsic],
-	indexed_meta: &[IndexedTransactionMeta],
-) -> (Vec<u8>, Vec<[u8; 32]>) {
-	let classification = classify_indexed_extrinsics::<Block>(body, indexed_meta);
-
-	let mut db_extrinsics: Vec<DbExtrinsic<Block>> = Vec::with_capacity(body.len());
-	let mut missing: Vec<[u8; 32]> = Vec::new();
-	let mut n_inserts = 0usize;
-
-	for (i, (kind, ext)) in classification.into_iter().zip(body.iter()).enumerate() {
-		match kind {
-			ClassifiedExtrinsic::Insert { hash, header_len, tail, .. } => {
-				let db_hash = DbHash::from_slice(&hash);
-				debug!(
-					target: "db",
-					"Indexed tx: STORE ext[{}] content_hash={:?} data_size={}",
-					i,
-					db_hash,
-					tail.len(),
-				);
-				transaction.store(columns::TRANSACTION, db_hash, tail);
-				let encoded = ext.encode();
-				let header = encoded[..header_len].to_vec();
-				db_extrinsics.push(DbExtrinsic::Indexed { hash: db_hash, header });
-				n_inserts += 1;
-			},
-			ClassifiedExtrinsic::Renew { hashes } => {
-				debug!(
-					target: "db",
-					"Indexed tx: RENEW ext[{}] hashes={} (data needs bitswap)",
-					i,
-					hashes.len(),
-				);
-				let encoded = ext.encode();
-				if hashes.len() == 1 {
-					let (hash, _) = hashes[0];
-					db_extrinsics.push(DbExtrinsic::Indexed {
-						hash: DbHash::from_slice(&hash),
-						header: encoded,
-					});
-					missing.push(hash);
-				} else {
-					let db_hashes: Vec<DbHash> =
-						hashes.iter().map(|(h, _)| DbHash::from_slice(h)).collect();
-					db_extrinsics
-						.push(DbExtrinsic::MultiRenew { hashes: db_hashes, extrinsic: encoded });
-					for (hash, _) in hashes {
-						missing.push(hash);
-					}
-				}
-			},
-			ClassifiedExtrinsic::Full => {
-				db_extrinsics.push(DbExtrinsic::Full(ext.clone()));
-			},
-		}
-	}
-
-	debug!(
-		target: "db",
-		"apply_body_with_indexed_meta: {} extrinsics, {} stores, {} renews (missing data)",
-		body.len(),
-		n_inserts,
-		missing.len(),
-	);
-
-	(db_extrinsics.encode(), missing)
-}
-
 fn apply_indexed_body<Block: BlockT>(transaction: &mut Transaction<DbHash>, body: Vec<Vec<u8>>) {
 	for extrinsic in body {
-		let hash = HashingAlgorithm::Blake2b256.hash(&extrinsic);
+		let hash = blake2_256(&extrinsic);
 		transaction.store(columns::TRANSACTION, DbHash::from_slice(&hash), extrinsic);
 	}
 }
@@ -6830,130 +6651,6 @@ pub(crate) mod tests {
 		assert_eq!(gap.end, 2);
 	}
 
-	mod classify_indexed_extrinsics_tests {
-		use super::*;
-
-		fn make_extrinsic(call: u64) -> UncheckedXt {
-			TestXt::new_signed(MockCallU64(call), 0, (), ())
-		}
-
-		fn make_meta(
-			content_hash: [u8; 32],
-			size: u32,
-			extrinsic_index: u32,
-			hashing: HashingAlgorithm,
-		) -> IndexedTransactionMeta {
-			IndexedTransactionMeta { content_hash, size, extrinsic_index, hashing }
-		}
-
-		fn meta_for_full_extrinsic(
-			ext: &UncheckedXt,
-			extrinsic_index: u32,
-			hashing: HashingAlgorithm,
-		) -> IndexedTransactionMeta {
-			let encoded = ext.encode();
-			let content_hash = hashing.hash(&encoded);
-			make_meta(content_hash, encoded.len() as u32, extrinsic_index, hashing)
-		}
-
-		#[test]
-		fn fast_path_classifies_inserts_when_extrinsic_index_is_real() {
-			let body = vec![make_extrinsic(0xAA), make_extrinsic(0xBB)];
-			let meta = vec![
-				meta_for_full_extrinsic(&body[0], 0, HashingAlgorithm::Blake2b256),
-				meta_for_full_extrinsic(&body[1], 1, HashingAlgorithm::Blake2b256),
-			];
-			let result = classify_indexed_extrinsics::<Block>(&body, &meta);
-			assert_eq!(result.len(), 2);
-			assert!(matches!(result[0], ClassifiedExtrinsic::Insert { .. }));
-			assert!(matches!(result[1], ClassifiedExtrinsic::Insert { .. }));
-		}
-
-		#[test]
-		fn fast_path_classifies_renew_when_tail_does_not_match() {
-			let body = vec![make_extrinsic(0xAA)];
-			let encoded_len = body[0].encode().len() as u32;
-			let meta = vec![make_meta([0u8; 32], encoded_len, 0, HashingAlgorithm::Blake2b256)];
-			let result = classify_indexed_extrinsics::<Block>(&body, &meta);
-			assert_eq!(result.len(), 1);
-			match &result[0] {
-				ClassifiedExtrinsic::Renew { hashes } => {
-					assert_eq!(hashes.len(), 1);
-				},
-				other => panic!("expected Renew, got {other:?}"),
-			}
-		}
-
-		#[test]
-		fn fast_path_classifies_multi_renew_at_same_index() {
-			let body = vec![make_extrinsic(0xAA)];
-			let encoded_len = body[0].encode().len() as u32;
-			let meta = vec![
-				make_meta([0u8; 32], encoded_len, 0, HashingAlgorithm::Blake2b256),
-				make_meta([1u8; 32], encoded_len, 0, HashingAlgorithm::Blake2b256),
-			];
-			let result = classify_indexed_extrinsics::<Block>(&body, &meta);
-			assert_eq!(result.len(), 1);
-			match &result[0] {
-				ClassifiedExtrinsic::Renew { hashes } => {
-					assert_eq!(hashes.len(), 2, "multi-renew should pack both hashes");
-				},
-				other => panic!("expected Renew, got {other:?}"),
-			}
-		}
-
-		#[test]
-		fn fast_path_returns_full_for_extrinsics_without_meta() {
-			let body = vec![make_extrinsic(0xAA), make_extrinsic(0xBB)];
-			let meta = vec![meta_for_full_extrinsic(&body[0], 0, HashingAlgorithm::Blake2b256)];
-			let result = classify_indexed_extrinsics::<Block>(&body, &meta);
-			assert_eq!(result.len(), 2);
-			assert!(matches!(result[0], ClassifiedExtrinsic::Insert { .. }));
-			assert!(matches!(result[1], ClassifiedExtrinsic::Full));
-		}
-
-		#[test]
-		fn unknown_extrinsic_index_is_ignored() {
-			let body = vec![make_extrinsic(0xCC)];
-			let meta =
-				vec![meta_for_full_extrinsic(&body[0], u32::MAX, HashingAlgorithm::Blake2b256)];
-			let result = classify_indexed_extrinsics::<Block>(&body, &meta);
-			assert_eq!(result.len(), 1);
-			assert!(matches!(result[0], ClassifiedExtrinsic::Full));
-		}
-
-		#[test]
-		fn classify_dispatches_per_entry_hashing_algorithm() {
-			let body = vec![make_extrinsic(0x11), make_extrinsic(0x22), make_extrinsic(0x33)];
-			let meta = vec![
-				meta_for_full_extrinsic(&body[0], 0, HashingAlgorithm::Blake2b256),
-				meta_for_full_extrinsic(&body[1], 1, HashingAlgorithm::Sha2_256),
-				meta_for_full_extrinsic(&body[2], 2, HashingAlgorithm::Keccak256),
-			];
-			let result = classify_indexed_extrinsics::<Block>(&body, &meta);
-			assert_eq!(result.len(), 3);
-			for entry in &result {
-				assert!(matches!(entry, ClassifiedExtrinsic::Insert { .. }));
-			}
-		}
-
-		#[test]
-		fn apply_body_with_indexed_meta_emits_store_for_inserts_only() {
-			let body = vec![make_extrinsic(0xAA), make_extrinsic(0xBB)];
-			let encoded_len = body[1].encode().len() as u32;
-			let meta = vec![
-				meta_for_full_extrinsic(&body[0], 0, HashingAlgorithm::Blake2b256),
-				make_meta([0u8; 32], encoded_len, 1, HashingAlgorithm::Blake2b256),
-			];
-			let mut tx = Transaction::new();
-			let (encoded_body_index, missing) =
-				apply_body_with_indexed_meta::<Block>(&mut tx, &body, &meta);
-			assert!(!encoded_body_index.is_empty());
-			assert_eq!(missing.len(), 1);
-			assert_eq!(missing[0], [0u8; 32]);
-		}
-	}
-
 	mod indexed_transaction_backend_tests {
 		use super::*;
 		use crate::utils::NUM_COLUMNS;
@@ -6994,9 +6691,10 @@ pub(crate) mod tests {
 			fn open(&self) -> Arc<dyn Database<DbHash>> {
 				match self {
 					Self::Persistent(arc) => arc.clone(),
-					Self::OnDisk { path, kind: BackendKind::ParityDb, .. } =>
+					Self::OnDisk { path, kind: BackendKind::ParityDb, .. } => {
 						crate::parity_db::open::<DbHash>(path, DatabaseType::Full, true, false)
-							.expect("parity-db open succeeds in test"),
+							.expect("parity-db open succeeds in test")
+					},
 					Self::OnDisk { path, kind: BackendKind::RocksDb, .. } => {
 						let mut cfg = kvdb_rocksdb::DatabaseConfig::with_columns(NUM_COLUMNS);
 						cfg.create_if_missing = true;
@@ -7239,7 +6937,9 @@ pub(crate) mod tests {
 			assert_eq!(get_value(&factory, h).as_deref(), Some(bytes.as_slice()));
 		}
 
-		fn check_prefetched_renew_creates_transaction_entry_atomically(factory: &mut BackendFactory) {
+		fn check_prefetched_renew_creates_transaction_entry_atomically(
+			factory: &mut BackendFactory,
+		) {
 			let payload = b"prefetched-blob-B1".to_vec();
 			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
@@ -7250,10 +6950,7 @@ pub(crate) mod tests {
 				Default::default(),
 				Default::default(),
 				vec![UncheckedXt::new_transaction(0.into(), ())],
-				Some(vec![IndexOperation::Renew {
-					extrinsic: 0,
-					hash: payload_hash_arr.to_vec(),
-				}]),
+				Some(vec![IndexOperation::Renew { extrinsic: 0, hash: payload_hash_arr.to_vec() }]),
 				vec![(payload_hash_arr, payload.clone())],
 			)
 			.unwrap();
@@ -7300,7 +6997,12 @@ pub(crate) mod tests {
 			.unwrap();
 			blocks.push(block0);
 
-			assert!(factory.backend().blockchain().indexed_transaction(payload_hash).unwrap().is_some());
+			assert!(factory
+				.backend()
+				.blockchain()
+				.indexed_transaction(payload_hash)
+				.unwrap()
+				.is_some());
 
 			let mut prev = block0;
 			for i in 1..6u64 {
@@ -7326,7 +7028,12 @@ pub(crate) mod tests {
 
 			factory.refresh_for_assertion();
 			assert!(
-				factory.backend().blockchain().indexed_transaction(payload_hash).unwrap().is_none(),
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.is_none(),
 				"prefetched data should be pruned once the only referencing block falls out",
 			);
 		}
@@ -7339,9 +7046,7 @@ pub(crate) mod tests {
 			check_prefetched_multi_renew_same_hash_balanced_lifecycle(&mut factory);
 		}
 
-		fn check_prefetched_renew_with_existing_data_keeps_value(
-			factory: &mut BackendFactory,
-		) {
+		fn check_prefetched_renew_with_existing_data_keeps_value(factory: &mut BackendFactory) {
 			let payload_xt = UncheckedXt::new_transaction(7.into(), ()).encode();
 			let payload = payload_xt[1..].to_vec();
 			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
@@ -7375,10 +7080,7 @@ pub(crate) mod tests {
 				block0,
 				Default::default(),
 				vec![UncheckedXt::new_transaction(99.into(), ())],
-				Some(vec![IndexOperation::Renew {
-					extrinsic: 0,
-					hash: payload_hash_arr.to_vec(),
-				}]),
+				Some(vec![IndexOperation::Renew { extrinsic: 0, hash: payload_hash_arr.to_vec() }]),
 				vec![(payload_hash_arr, payload.clone())],
 			)
 			.unwrap();
@@ -7404,7 +7106,9 @@ pub(crate) mod tests {
 			check_prefetched_renew_with_existing_data_keeps_value(&mut factory);
 		}
 
-		fn check_prefetched_single_renew_full_lifecycle_through_prune(factory: &mut BackendFactory) {
+		fn check_prefetched_single_renew_full_lifecycle_through_prune(
+			factory: &mut BackendFactory,
+		) {
 			let payload = b"prefetched-blob-B4".to_vec();
 			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
@@ -7416,17 +7120,19 @@ pub(crate) mod tests {
 				Default::default(),
 				Default::default(),
 				vec![UncheckedXt::new_transaction(0.into(), ())],
-				Some(vec![IndexOperation::Renew {
-					extrinsic: 0,
-					hash: payload_hash_arr.to_vec(),
-				}]),
+				Some(vec![IndexOperation::Renew { extrinsic: 0, hash: payload_hash_arr.to_vec() }]),
 				vec![(payload_hash_arr, payload.clone())],
 			)
 			.unwrap();
 			blocks.push(block0);
 
 			assert_eq!(
-				factory.backend().blockchain().indexed_transaction(payload_hash).unwrap().as_deref(),
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.as_deref(),
 				Some(payload.as_slice()),
 				"prefetched data accessible immediately after import",
 			);
@@ -7455,7 +7161,12 @@ pub(crate) mod tests {
 
 			factory.refresh_for_assertion();
 			assert!(
-				factory.backend().blockchain().indexed_transaction(payload_hash).unwrap().is_none(),
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.is_none(),
 				"single-renew prefetched data must be fully released after retention exit",
 			);
 		}
@@ -7498,16 +7209,18 @@ pub(crate) mod tests {
 				block0,
 				Default::default(),
 				vec![UncheckedXt::new_transaction(99.into(), ())],
-				Some(vec![IndexOperation::Renew {
-					extrinsic: 0,
-					hash: payload_hash_arr.to_vec(),
-				}]),
+				Some(vec![IndexOperation::Renew { extrinsic: 0, hash: payload_hash_arr.to_vec() }]),
 				vec![(payload_hash_arr, payload.clone())],
 			)
 			.unwrap();
 			blocks.push(block1);
 
-			assert!(factory.backend().blockchain().indexed_transaction(payload_hash).unwrap().is_some());
+			assert!(factory
+				.backend()
+				.blockchain()
+				.indexed_transaction(payload_hash)
+				.unwrap()
+				.is_some());
 
 			let mut prev = block1;
 			for i in 2..7u64 {
@@ -7533,7 +7246,12 @@ pub(crate) mod tests {
 
 			factory.refresh_for_assertion();
 			assert!(
-				factory.backend().blockchain().indexed_transaction(payload_hash).unwrap().is_none(),
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.is_none(),
 				"redundant prefetch must not leak refcount through prune",
 			);
 		}
@@ -7547,7 +7265,9 @@ pub(crate) mod tests {
 			check_redundant_prefetch_on_local_data_balanced_lifecycle(&mut factory);
 		}
 
-		fn check_same_block_insert_and_renew_different_indices_with_prefetch(factory: &mut BackendFactory) {
+		fn check_same_block_insert_and_renew_different_indices_with_prefetch(
+			factory: &mut BackendFactory,
+		) {
 			let x_xt = UncheckedXt::new_transaction(0.into(), ()).encode();
 			let x = x_xt[1..].to_vec();
 			let x_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&x);
@@ -7628,14 +7348,14 @@ pub(crate) mod tests {
 		#[case::kvdb_memdb(BackendKind::KvdbMemdb)]
 		#[case::paritydb(BackendKind::ParityDb)]
 		#[case::rocksdb(BackendKind::RocksDb)]
-		fn same_block_insert_and_renew_different_indices_with_prefetch(
-			#[case] kind: BackendKind,
-		) {
+		fn same_block_insert_and_renew_different_indices_with_prefetch(#[case] kind: BackendKind) {
 			let mut factory = BackendFactory::new(kind, BlocksPruning::Some(2));
 			check_same_block_insert_and_renew_different_indices_with_prefetch(&mut factory);
 		}
 
-		fn check_sequential_renew_blocks_all_prefetched_eventually_pruned(factory: &mut BackendFactory) {
+		fn check_sequential_renew_blocks_all_prefetched_eventually_pruned(
+			factory: &mut BackendFactory,
+		) {
 			let payload = b"prefetched-blob-B7".to_vec();
 			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
 			let payload_hash_arr: [u8; 32] = payload_hash.into();
@@ -7660,7 +7380,12 @@ pub(crate) mod tests {
 				prev = block;
 			}
 
-			assert!(factory.backend().blockchain().indexed_transaction(payload_hash).unwrap().is_some());
+			assert!(factory
+				.backend()
+				.blockchain()
+				.indexed_transaction(payload_hash)
+				.unwrap()
+				.is_some());
 
 			for i in 4..10u64 {
 				prev = insert_block(
@@ -7685,7 +7410,12 @@ pub(crate) mod tests {
 
 			factory.refresh_for_assertion();
 			assert!(
-				factory.backend().blockchain().indexed_transaction(payload_hash).unwrap().is_none(),
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.is_none(),
 				"sequential prefetched renews must all release through prune",
 			);
 		}
