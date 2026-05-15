@@ -77,12 +77,12 @@ use sp_core::{
 	offchain::OffchainOverlayedChange,
 	storage::{well_known_keys, ChildInfo},
 };
-use sp_crypto_hashing::blake2_256;
 use sp_database::Transaction;
 use sp_runtime::{
 	generic::BlockId,
 	traits::{
-		Block as BlockT, HashingFor, Header as HeaderT, NumberFor, One, SaturatedConversion, Zero,
+		Block as BlockT, Hash, HashingFor, Header as HeaderT, NumberFor, One, SaturatedConversion,
+		Zero,
 	},
 	Justification, Justifications, StateVersion, Storage,
 };
@@ -2368,8 +2368,8 @@ fn apply_index_ops<Block: BlockT>(
 
 fn apply_indexed_body<Block: BlockT>(transaction: &mut Transaction<DbHash>, body: Vec<Vec<u8>>) {
 	for extrinsic in body {
-		let hash = blake2_256(&extrinsic);
-		transaction.store(columns::TRANSACTION, DbHash::from_slice(&hash), extrinsic);
+		let hash = sp_runtime::traits::BlakeTwo256::hash(&extrinsic);
+		transaction.store(columns::TRANSACTION, DbHash::from_slice(hash.as_ref()), extrinsic);
 	}
 }
 
