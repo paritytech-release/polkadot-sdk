@@ -255,7 +255,7 @@ pub trait BlockImportOperation<Block: BlockT> {
 	fn update_transaction_index(&mut self, index: Vec<IndexOperation>)
 		-> sp_blockchain::Result<()>;
 
-	/// Hook called by `apply_block` to forward bytes from `PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY` to the backend.
+	/// Forward `prefetched_indexed_transactions` from the block import params to the backend.
 	fn set_prefetched_indexed_transactions(
 		&mut self,
 		_data: Vec<([u8; 32], Vec<u8>)>,
@@ -266,10 +266,6 @@ pub trait BlockImportOperation<Block: BlockT> {
 	/// Configure whether to create a block gap if newly imported block is missing parent
 	fn set_create_gap(&mut self, create_gap: bool);
 }
-
-	/// `BlockImportParams::intermediates` key for prefetched indexed-transaction bytes.
-	pub const PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY: &[u8] =
-	b"prefetched-indexed-transactions";
 
 /// Interface for performing operations on the backend.
 pub trait LockImportRun<Block: BlockT, B: Backend<Block>> {
