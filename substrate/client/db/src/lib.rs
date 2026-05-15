@@ -2289,11 +2289,6 @@ fn apply_index_ops<Block: BlockT>(
 			},
 		}
 	}
-	// First occurrence consumes the prefetched bytes via `remove`, becoming a
-	// Store; every subsequent occurrence misses and falls through to Reference.
-	// One bump per renew occurrence matches one Release per occurrence at prune;
-	// emitting both Store and Reference for the same hash leaks refcount on
-	// parity-db.
 	let mut process_renew_occurrence = |tx: &mut Transaction<DbHash>, hash: DbHash| {
 		if let Some(bytes) = prefetched.remove(&hash) {
 			tx.store(columns::TRANSACTION, hash, bytes);
