@@ -27,7 +27,6 @@ pub use fetcher::{BitswapPeerSource, IndexedTransactionFetcher, NetworkHandle, S
 
 use codec::{Decode, Encode};
 use sc_client_api::{backend::PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY, BlockBackend};
-use sc_client_db::{classify_indexed_extrinsics, ClassifiedExtrinsic, IndexedTransactionMeta};
 use sc_consensus::{
 	BlockCheckParams, BlockImport, BlockImportParams, ImportResult, StateAction,
 	StorageChanges as ConsensusStorageChanges,
@@ -180,13 +179,8 @@ where
 
 		if matches!(params.origin, BlockOrigin::GapSync) {
 			let runtime_api = self.client.runtime_api();
-			let infos = runtime_api
-				.execute_in_transaction(|api| {
-					TransactionOutcome::Rollback(
-						api.indexed_transactions(parent_hash, block_number),
-					)
-				})
-				.map_err(|e| {
+			let infos =
+				runtime_api.indexed_transactions(parent_hash, block_number).map_err(|e| {
 					ConsensusError::Other(
 						format!("indexed_transactions runtime API failed: {e}").into(),
 					)
@@ -446,52 +440,35 @@ struct FetchedRenews {
 	payload: Vec<(ContentHash, Vec<u8>)>,
 }
 
-#[cfg(test)]
-fn is_supported(info: &&IndexedTransactionInfo) -> bool {
-	info.cid_codec == RAW_CODEC
-}
-
-#[cfg(test)]
-fn to_db_meta(info: &IndexedTransactionInfo) -> IndexedTransactionMeta {
-	IndexedTransactionMeta {
-		content_hash: info.content_hash,
-		size: info.size,
-		extrinsic_index: info.extrinsic_index,
-		hashing: info.hashing,
-	}
-}
-
-/// Returns runtime-declared renew (hash, hashing) pairs whose bytes are NOT in the body —
-/// i.e. the entries that must be fetched from elsewhere.
+/// Returns runtime-declared renew (hash, hashing) pairs whose bytes are not in the body.
+/// These entries must be fetched from elsewhere.
 ///
 /// Filters out non-RAW codec entries (not bitswap-fetchable). Pure; no side effects.
 fn body_classify_renews<Block: BlockT>(
 	infos: &[IndexedTransactionInfo],
 	body: &[Block::Extrinsic],
 ) -> HashSet<(ContentHash, HashingAlgorithm)> {
-	let db_meta: Vec<IndexedTransactionMeta> = infos
-		.iter()
-		.filter(|info| info.cid_codec == RAW_CODEC)
-		.map(|info| IndexedTransactionMeta {
-			content_hash: info.content_hash,
-			size: info.size,
-			extrinsic_index: info.extrinsic_index,
-			hashing: info.hashing,
-		})
-		.collect();
+	let mut renews = HashSet::new();
+	let is_fetchable = |info: &IndexedTransactionInfo| {
+		info.cid_codec == RAW_CODEC && info.extrinsic_index != u32::MAX
+	};
 
-	if db_meta.is_empty() {
-		return HashSet::new();
+	for info in infos.iter().filter(|info| is_fetchable(info)) {
+		let Some(ext) = body.get(info.extrinsic_index as usize) else { continue };
+		let encoded = ext.encode();
+		let size = info.size as usize;
+		if encoded.len() < size {
+			renews.insert((info.content_hash, info.hashing));
+			continue;
+		}
+
+		let tail = &encoded[encoded.len() - size..];
+		if info.hashing.hash(tail) != info.content_hash {
+			renews.insert((info.content_hash, info.hashing));
+		}
 	}
 
-	classify_indexed_extrinsics::<Block>(body, &db_meta)
-		.into_iter()
-		.filter_map(|entry| match entry {
-			ClassifiedExtrinsic::Renew { hashes } => Some(hashes),
-			_ => None,
-		})
-		.flatten()
-		.collect()
+	renews
 }
 
 impl From<FetchError> for ConsensusError {
@@ -537,43 +514,6 @@ mod tests {
 	) -> IndexedTransactionInfo {
 		let encoded = ext.encode();
 		info(hashing.hash(&encoded), encoded.len() as u32, hashing, codec, extrinsic_index)
-	}
-
-	#[test]
-	fn is_supported_accepts_all_hashings_with_raw_codec() {
-		for algo in
-			[HashingAlgorithm::Blake2b256, HashingAlgorithm::Sha2_256, HashingAlgorithm::Keccak256]
-		{
-			let i = info([0u8; 32], 100, algo, RAW_CODEC, 0);
-			assert!(is_supported(&&i), "{algo:?} should be supported with RAW codec");
-		}
-	}
-
-	#[test]
-	fn is_supported_rejects_non_raw_codec() {
-		for algo in
-			[HashingAlgorithm::Blake2b256, HashingAlgorithm::Sha2_256, HashingAlgorithm::Keccak256]
-		{
-			let i = info([0u8; 32], 100, algo, 0x70, 0);
-			assert!(!is_supported(&&i), "{algo:?} with non-RAW codec should be rejected");
-		}
-	}
-
-	#[test]
-	fn to_db_meta_preserves_all_fields() {
-		let h = [7u8; 32];
-		let i = IndexedTransactionInfo {
-			content_hash: h,
-			size: 4096,
-			hashing: HashingAlgorithm::Sha2_256,
-			cid_codec: RAW_CODEC,
-			extrinsic_index: 17,
-		};
-		let meta = to_db_meta(&i);
-		assert_eq!(meta.content_hash, h);
-		assert_eq!(meta.size, 4096);
-		assert_eq!(meta.extrinsic_index, 17);
-		assert_eq!(meta.hashing, HashingAlgorithm::Sha2_256);
 	}
 
 	#[test]
@@ -630,6 +570,49 @@ mod tests {
 				([3; 32], HashingAlgorithm::Keccak256),
 			]),
 		);
+	}
+
+	#[test]
+	fn body_classify_renews_accepts_matching_tail_for_each_hashing() {
+		for hashing in
+			[HashingAlgorithm::Blake2b256, HashingAlgorithm::Sha2_256, HashingAlgorithm::Keccak256]
+		{
+			let body = vec![extrinsic(&[0x42])];
+			let infos = vec![body_info(&body[0], 0, hashing, RAW_CODEC)];
+
+			assert!(
+				body_classify_renews::<Block>(&infos, &body).is_empty(),
+				"{hashing:?} matching tail should be an insert",
+			);
+		}
+	}
+
+	#[test]
+	fn body_classify_renews_treats_oversized_tail_as_renew() {
+		let body = vec![extrinsic(&[0xaa])];
+		let infos = vec![info(
+			[4; 32],
+			body[0].encode().len() as u32 + 1,
+			HashingAlgorithm::Blake2b256,
+			RAW_CODEC,
+			0,
+		)];
+
+		let renews = body_classify_renews::<Block>(&infos, &body);
+
+		assert_eq!(renews, HashSet::from([([4; 32], HashingAlgorithm::Blake2b256)]));
+	}
+
+	#[test]
+	fn body_classify_renews_ignores_unknown_and_out_of_range_indexes() {
+		let body = vec![extrinsic(&[0xaa])];
+		let encoded_len = body[0].encode().len() as u32;
+		let infos = vec![
+			info([5; 32], encoded_len, HashingAlgorithm::Blake2b256, RAW_CODEC, u32::MAX),
+			info([6; 32], encoded_len, HashingAlgorithm::Blake2b256, RAW_CODEC, 99),
+		];
+
+		assert!(body_classify_renews::<Block>(&infos, &body).is_empty());
 	}
 
 	#[test]
