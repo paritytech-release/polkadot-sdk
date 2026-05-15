@@ -21,10 +21,7 @@ use async_trait::async_trait;
 use cid::{multihash::Multihash, Cid};
 use futures::channel::oneshot;
 use sc_network::{
-	bitswap::{
-		RAW_CODEC, request_bitswap_blocks, request_bitswap_blocks_unverified, FetchOutcome,
-		MAX_WANTED_BLOCKS,
-	},
+	bitswap::{request_bitswap_blocks, FetchOutcome, MAX_WANTED_BLOCKS, RAW_CODEC},
 	NetworkRequest, PeerId,
 };
 use sc_network_sync::SyncingService;
@@ -74,9 +71,7 @@ pub enum FetchError {
 /// Fetcher that resolves indexed-transaction hashes via bitswap.
 ///
 /// Owns the late-bound network/sync handles plus the per-peer iteration policy. The block-import
-/// path holds one of these and calls [`Self::fetch_many`] (verified path, runtime-API discovery)
-/// or [`Self::fetch_many_unverified`] (unverified path, host-call discovery) for each batch of
-/// missing renew hashes.
+/// path holds one of these and calls [`Self::fetch_many`] for each batch of missing renew hashes.
 ///
 /// Cloning is cheap: every field is an `Arc`-equivalent.
 pub struct IndexedTransactionFetcher<Block: BlockT> {
@@ -151,65 +146,6 @@ impl<Block: BlockT> IndexedTransactionFetcher<Block> {
 
 		Ok(acquired)
 	}
-
-	/// Resolve a batch of `ContentHash`es via bitswap across up to [`MAX_PEERS_PER_IMPORT`] peers.
-	///
-	/// Differs from [`Self::fetch_many`] in that the caller does NOT supply a `HashingAlgorithm`
-	/// per hash. This is for renews discovered via `IndexOperation::Renew { hash, .. }`
-	/// host-call output, which carries only the 32-byte content hash. The substrate bitswap
-	/// server is algorithm-agnostic (looks up by 32-byte digest only) so the request succeeds
-	/// regardless of the real hashing algorithm. Each returned blob is hashed locally with every
-	/// supported [`HashingAlgorithm`] and accepted iff one matches the requested digest;
-	/// mismatching blobs are dropped so the surrounding peer-rotation loop retries the next peer.
-	///
-	/// Sends one WANT-BLOCK per hash per peer. Returns only successfully fetched entries.
-	pub async fn fetch_many_unverified(
-		&self,
-		wants: &[ContentHash],
-	) -> Result<HashMap<ContentHash, Vec<u8>>, FetchError> {
-		if wants.is_empty() {
-			return Ok(HashMap::new());
-		}
-		let network = self.network.get().ok_or(FetchError::NetworkHandleUnset)?;
-		let peer_source = self.peer_source.get().ok_or(FetchError::SyncingHandleUnset)?;
-
-		let peers = match peer_source.current_peers().await {
-			Ok(peers) => peers,
-			Err(_) => {
-				log::warn!(target: LOG_TARGET, "current_peers() channel cancelled");
-				return Ok(HashMap::new());
-			},
-		};
-		if peers.is_empty() {
-			log::debug!(
-				target: LOG_TARGET,
-				"no connected sync peers, cannot fetch via bitswap yet",
-			);
-			return Ok(HashMap::new());
-		}
-
-		// Construct CIDs with the conventional Blake2b-256 multihash code; the substrate bitswap
-		// server keys on the 32-byte digest only, so the algorithm tag is a request-side label
-		// the server does not validate.
-		let cids: Vec<(ContentHash, Cid)> = wants
-			.iter()
-			.map(|hash| Ok::<_, FetchError>((*hash, cid_for(*hash, HashingAlgorithm::Blake2b256)?)))
-			.collect::<Result<_, _>>()?;
-		let mut remaining = cids;
-		let mut acquired: HashMap<ContentHash, Vec<u8>> = HashMap::new();
-
-		for peer in peers.into_iter().take(MAX_PEERS_PER_IMPORT) {
-			if remaining.is_empty() {
-				break;
-			}
-			let from_peer =
-				try_fetch_from_peer_unverified(network.as_ref(), peer, &remaining).await;
-			acquired.extend(from_peer);
-			remaining.retain(|(hash, _)| !acquired.contains_key(hash));
-		}
-
-		Ok(acquired)
-	}
 }
 
 /// Try every chunk of `wants` against a single peer in sequence. Returns whatever blocks the
@@ -223,11 +159,8 @@ async fn try_fetch_from_peer<N: NetworkRequest + ?Sized>(
 	let mut acquired: HashMap<ContentHash, Vec<u8>> = HashMap::new();
 	for chunk in wants.chunks(MAX_WANTED_BLOCKS) {
 		let cids: Vec<Cid> = chunk.iter().map(|(_, cid)| *cid).collect();
-		match with_timeout(
-			request_bitswap_blocks(network, peer, &cids),
-			BITSWAP_PER_PEER_TIMEOUT,
-		)
-		.await
+		match with_timeout(request_bitswap_blocks(network, peer, &cids), BITSWAP_PER_PEER_TIMEOUT)
+			.await
 		{
 			None => {
 				log::debug!(
@@ -241,7 +174,7 @@ async fn try_fetch_from_peer<N: NetworkRequest + ?Sized>(
 				log::debug!(target: LOG_TARGET, "request_bitswap_blocks to {peer:?}: {e:?}");
 				return acquired;
 			},
-			Some(Ok(per_cid)) =>
+			Some(Ok(per_cid)) => {
 				for (hash, cid) in chunk {
 					if let Some(FetchOutcome::Block(data)) = per_cid.get(cid) {
 						log::debug!(
@@ -252,69 +185,8 @@ async fn try_fetch_from_peer<N: NetworkRequest + ?Sized>(
 						);
 						acquired.insert(*hash, data.clone());
 					}
-				},
-		}
-	}
-	acquired
-}
-
-/// Unverified-path counterpart of [`try_fetch_from_peer`]. The upstream
-/// [`request_bitswap_blocks_unverified`] correlates payloads by request order and CID prefix; we
-/// translate the response back to our [`ContentHash`] keys via the per-want CID list.
-async fn try_fetch_from_peer_unverified<N: NetworkRequest + ?Sized>(
-	network: &N,
-	peer: PeerId,
-	wants: &[(ContentHash, Cid)],
-) -> HashMap<ContentHash, Vec<u8>> {
-	let mut acquired: HashMap<ContentHash, Vec<u8>> = HashMap::new();
-	for chunk in wants.chunks(MAX_WANTED_BLOCKS) {
-		let cids: Vec<Cid> = chunk.iter().map(|(_, cid)| *cid).collect();
-		match with_timeout(
-			request_bitswap_blocks_unverified(network, peer, &cids),
-			BITSWAP_PER_PEER_TIMEOUT,
-		)
-		.await
-		{
-			None => {
-				log::debug!(
-					target: LOG_TARGET,
-					"request_bitswap_blocks_unverified to {peer:?}: timeout (chunk size {})",
-					chunk.len(),
-				);
-				return acquired;
+				}
 			},
-			Some(Err(e)) => {
-				log::debug!(
-					target: LOG_TARGET,
-					"request_bitswap_blocks_unverified to {peer:?}: {e:?}",
-				);
-				return acquired;
-			},
-			Some(Ok(per_cid)) =>
-				for (hash, cid) in chunk {
-					if let Some(FetchOutcome::Block(data)) = per_cid.get(cid) {
-						match verify_blob(hash, data) {
-							Some(algo) => {
-								log::debug!(
-									target: LOG_TARGET,
-									"fetched {} bytes for {:?} from {peer:?} (verified as {algo:?})",
-									data.len(),
-									hash,
-								);
-								acquired.insert(*hash, data.clone());
-							},
-							None => {
-								log::warn!(
-									target: LOG_TARGET,
-									"discarding {} bytes from {peer:?} for {:?}: \
-									 did not match any supported hashing algorithm; will retry next peer",
-									data.len(),
-									hash,
-								);
-							},
-						}
-					}
-				},
 		}
 	}
 	acquired
@@ -325,21 +197,6 @@ fn cid_for(hash: ContentHash, algo: HashingAlgorithm) -> Result<Cid, FetchError>
 	let mh = Multihash::<64>::wrap(algo.multihash_code(), &hash)
 		.map_err(|e| FetchError::Multihash(e.to_string()))?;
 	Ok(Cid::new_v1(RAW_CODEC, mh))
-}
-
-/// Returns the [`HashingAlgorithm`] that hashes `data` to `expected`, if any of the three
-/// supported algorithms matches.
-fn verify_blob(expected: &ContentHash, data: &[u8]) -> Option<HashingAlgorithm> {
-	for algo in [
-		HashingAlgorithm::Blake2b256,
-		HashingAlgorithm::Sha2_256,
-		HashingAlgorithm::Keccak256,
-	] {
-		if &algo.hash(data) == expected {
-			return Some(algo);
-		}
-	}
-	None
 }
 
 async fn with_timeout<F, T>(fut: F, timeout: Duration) -> Option<T>

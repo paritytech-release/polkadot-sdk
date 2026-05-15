@@ -25,6 +25,7 @@ mod fetcher;
 pub(crate) use fetcher::FetchError;
 pub use fetcher::{BitswapPeerSource, IndexedTransactionFetcher, NetworkHandle, SyncingHandle};
 
+use codec::{Decode, Encode};
 use sc_client_api::{backend::PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY, BlockBackend};
 use sc_client_db::{classify_indexed_extrinsics, ClassifiedExtrinsic, IndexedTransactionMeta};
 use sc_consensus::{
@@ -32,17 +33,22 @@ use sc_consensus::{
 	StorageChanges as ConsensusStorageChanges,
 };
 use sc_network::bitswap::RAW_CODEC;
-use sp_api::{ApiExt, CallApiAt, CallContext, Core, ProofRecorder, ProvideRuntimeApi};
+use sp_api::{
+	ApiExt, CallApiAt, CallApiAtParams, CallContext, Core, ProofRecorder, ProvideRuntimeApi,
+	TransactionOutcome,
+};
 use sp_consensus::{BlockOrigin, Error as ConsensusError};
+use sp_core::storage::ChildInfo;
 use sp_runtime::traits::{Block as BlockT, HashingFor, Header as HeaderT};
-use sp_state_machine::{IndexOperation, StorageChanges};
+use sp_state_machine::{IndexOperation, OverlayedChanges, StorageChanges};
 use sp_transaction_storage_proof::{
 	runtime_api::TransactionStorageApi, ContentHash, HashingAlgorithm, IndexedTransactionInfo,
 };
 use sp_trie::proof_size_extension::ProofSizeExt;
-use std::{collections::HashSet, marker::PhantomData, sync::Arc};
+use std::{cell::RefCell, collections::HashSet, marker::PhantomData, sync::Arc};
 
 const LOG_TARGET: &str = "storage-chain-block-import";
+const INDEXED_TRANSACTIONS_API: &str = "TransactionStorageApi_indexed_transactions";
 
 /// Block-import wrapper that bitswap-fetches missing TRANSACTION-column entries
 /// for tip-sync blocks before delegating to the inner block import.
@@ -138,50 +144,53 @@ where
 			.unwrap_or(false)
 	}
 
-	/// Discovers renew hashes via Case A (peek), B (re-execute), or C (runtime API).
+	/// Discovers renew hashes via Case A (incoming changes), B (execute once), or C (runtime API).
 	///
 	/// `&mut params` because Case B reassigns `params.state_action` to the executed
 	/// `StorageChanges` so the inner block-import skips re-execution.
 	fn classify_renew_hashes(
 		&self,
 		params: &mut BlockImportParams<Block>,
-	) -> Result<RenewHashes, ConsensusError> {
+	) -> Result<HashSet<(ContentHash, HashingAlgorithm)>, ConsensusError> {
 		let parent_hash = *params.header.parent_hash();
 		let block_number = *params.header.number();
+		let body = params.body.as_ref().ok_or_else(|| {
+			ConsensusError::Other("StorageChainBlockImport: body absent after gate".into())
+		})?;
 
 		if let Some(changes) = params.state_action.as_storage_changes() {
-			let renews = extract_renews_from_index_ops(&changes.transaction_index_changes);
+			let infos =
+				self.indexed_transactions_with_storage_changes(parent_hash, block_number, changes)?;
+			let renews = verified_renews_from_index_ops(
+				&changes.transaction_index_changes,
+				&infos,
+				"case A",
+			)?;
 			if !renews.is_empty() {
 				log::debug!(
 					target: LOG_TARGET,
-					"block #{block_number:?} ({parent_hash:?}): case A peek, {} renew hashes",
+					"block #{block_number:?} ({parent_hash:?}): case A runtime-API overlay, \
+					 {} indexed entries, {} renew hashes",
+					infos.len(),
 					renews.len(),
 				);
 			}
-			return Ok(RenewHashes::Unverified(renews));
+			return Ok(renews);
 		}
 
 		if matches!(params.origin, BlockOrigin::GapSync) {
-			let infos = self
-				.client
-				.runtime_api()
-				.indexed_transactions(parent_hash, block_number)
+			let runtime_api = self.client.runtime_api();
+			let infos = runtime_api
+				.execute_in_transaction(|api| {
+					TransactionOutcome::Rollback(
+						api.indexed_transactions(parent_hash, block_number),
+					)
+				})
 				.map_err(|e| {
-				ConsensusError::Other(
-					format!("indexed_transactions runtime API failed: {e}").into(),
-				)
-			})?;
-			if infos.iter().any(|info| info.extrinsic_index == u32::MAX) {
-				log::debug!(
-					target: LOG_TARGET,
-					"block #{block_number:?} ({parent_hash:?}): case C runtime-API returned \
-					 metadata without concrete extrinsic indexes; skipping wrapper bitswap",
-				);
-				return Ok(RenewHashes::Verified(HashSet::new()));
-			}
-			let body = params.body.as_ref().ok_or_else(|| {
-				ConsensusError::Other("StorageChainBlockImport: body absent after gate".into())
-			})?;
+					ConsensusError::Other(
+						format!("indexed_transactions runtime API failed: {e}").into(),
+					)
+				})?;
 			let renews = body_classify_renews::<Block>(&infos, body);
 			if !renews.is_empty() {
 				log::debug!(
@@ -192,16 +201,21 @@ where
 					renews.len(),
 				);
 			}
-			return Ok(RenewHashes::Verified(renews));
+			return Ok(renews);
 		}
 
-		let gen_storage_changes = self.execute_block(params)?;
-		let renews = extract_renews_from_index_ops(&gen_storage_changes.transaction_index_changes);
+		let (gen_storage_changes, infos) = self.execute_block(params)?;
+		let renews = verified_renews_from_index_ops(
+			&gen_storage_changes.transaction_index_changes,
+			&infos,
+			"case B",
+		)?;
 		if !renews.is_empty() {
 			log::debug!(
 				target: LOG_TARGET,
-				"block #{block_number:?} ({parent_hash:?}): case B re-executed, \
-				 {} renew hashes",
+				"block #{block_number:?} ({parent_hash:?}): case B execute-once runtime-API, \
+				 {} indexed entries, {} renew hashes",
+				infos.len(),
 				renews.len(),
 			);
 		}
@@ -209,59 +223,45 @@ where
 		params.state_action =
 			StateAction::ApplyChanges(ConsensusStorageChanges::Changes(gen_storage_changes));
 
-		Ok(RenewHashes::Unverified(renews))
+		Ok(renews)
 	}
 
 	/// Drops every entry whose data is already in the local TRANSACTION column.
-	fn filter_missing(&self, renews: RenewHashes) -> RenewHashes {
-		let already_present = |hash: &ContentHash| {
-			self.client.has_indexed_transaction((*hash).into()).unwrap_or(false)
-		};
-		match renews {
-			RenewHashes::Verified(set) => RenewHashes::Verified(
-				set.into_iter().filter(|(hash, _)| !already_present(hash)).collect(),
-			),
-			RenewHashes::Unverified(set) => RenewHashes::Unverified(
-				set.into_iter().filter(|hash| !already_present(hash)).collect(),
-			),
-		}
+	fn filter_missing(
+		&self,
+		renews: HashSet<(ContentHash, HashingAlgorithm)>,
+	) -> HashSet<(ContentHash, HashingAlgorithm)> {
+		renews
+			.into_iter()
+			.filter(|(hash, _)| {
+				!self.client.has_indexed_transaction((*hash).into()).unwrap_or(false)
+			})
+			.collect()
 	}
 
-	/// Bitswap-fetch every missing entry; dispatches to verified or unverified path
-	/// per [`RenewHashes`] variant. Errors if any entry was not served.
-	async fn fetch_all(&self, missing: RenewHashes) -> Result<FetchedRenews, ConsensusError> {
+	/// Bitswap-fetch every missing entry. Errors if any entry was not served.
+	async fn fetch_all(
+		&self,
+		missing: HashSet<(ContentHash, HashingAlgorithm)>,
+	) -> Result<FetchedRenews, ConsensusError> {
 		if missing.is_empty() {
 			return Ok(FetchedRenews::default());
 		}
 
-		let (wanted_hashes, acquired) = match missing {
-			RenewHashes::Verified(set) => {
-				let wants: Vec<(ContentHash, HashingAlgorithm)> = set.into_iter().collect();
-				let acquired = self.fetcher.fetch_many(&wants).await?;
-				let hashes: Vec<ContentHash> = wants.into_iter().map(|(h, _)| h).collect();
-				(hashes, acquired)
-			},
-			RenewHashes::Unverified(set) => {
-				let wants: Vec<ContentHash> = set.into_iter().collect();
-				let acquired = self.fetcher.fetch_many_unverified(&wants).await?;
-				(wants, acquired)
-			},
-		};
+		let wants: Vec<(ContentHash, HashingAlgorithm)> = missing.into_iter().collect();
+		let acquired = self.fetcher.fetch_many(&wants).await?;
 
-		if acquired.len() != wanted_hashes.len() {
-			let missing_count = wanted_hashes.len() - acquired.len();
+		if acquired.len() != wants.len() {
+			let missing_count = wants.len() - acquired.len();
 			return Err(ConsensusError::Other(
-				format!(
-					"bitswap fetch: {missing_count} of {} entries not served",
-					wanted_hashes.len(),
-				)
-				.into(),
+				format!("bitswap fetch: {missing_count} of {} entries not served", wants.len())
+					.into(),
 			));
 		}
 
-		let payload: Vec<(ContentHash, Vec<u8>)> = wanted_hashes
+		let payload: Vec<(ContentHash, Vec<u8>)> = wants
 			.iter()
-			.map(|hash| {
+			.map(|(hash, _)| {
 				let data = acquired
 					.get(hash)
 					.expect("all hashes present; len equality verified above; qed")
@@ -291,13 +291,64 @@ where
 		params.insert_intermediate(PREFETCHED_INDEXED_TRANSACTIONS_INTERMEDIATE_KEY, fetched);
 	}
 
-	/// Execute via runtime API to obtain `StorageChanges` (Case B). Caller must reassign
-	/// `params.state_action` to `ApplyChanges(Changes(_))` before forwarding to the inner
-	/// block import, otherwise the inner client re-executes.
+	/// Query TransactionStorageApi against parent state plus supplied StorageChanges.
+	fn indexed_transactions_with_storage_changes(
+		&self,
+		parent_hash: Block::Hash,
+		block_number: sp_runtime::traits::NumberFor<Block>,
+		changes: &StorageChanges<HashingFor<Block>>,
+	) -> Result<Vec<IndexedTransactionInfo>, ConsensusError> {
+		let has_api = self
+			.client
+			.runtime_api()
+			.has_api_with::<dyn TransactionStorageApi<Block>, _>(parent_hash, |v| v >= 2)
+			.unwrap_or(false);
+		if !has_api {
+			return Ok(Vec::new());
+		}
+
+		let overlayed_changes = RefCell::new(overlay_from_storage_changes::<Block>(changes));
+		let recorder = None;
+		let mut extensions = sp_externalities::Extensions::new();
+		self.client.initialize_extensions(parent_hash, &mut extensions).map_err(|e| {
+			ConsensusError::Other(
+				format!("indexed_transactions: initialize_extensions: {e}").into(),
+			)
+		})?;
+		let extensions = RefCell::new(extensions);
+
+		let encoded = (block_number,).encode();
+		overlayed_changes.borrow_mut().start_transaction();
+		let raw = self.client.call_api_at(CallApiAtParams {
+			at: parent_hash,
+			function: INDEXED_TRANSACTIONS_API,
+			arguments: encoded,
+			overlayed_changes: &overlayed_changes,
+			call_context: CallContext::Onchain { import: true },
+			recorder: &recorder,
+			extensions: &extensions,
+		});
+
+		overlayed_changes
+			.borrow_mut()
+			.rollback_transaction()
+			.expect("transaction was opened immediately above; qed");
+
+		let raw = raw.map_err(|e| {
+			ConsensusError::Other(format!("indexed_transactions: call_api_at: {e}").into())
+		})?;
+
+		Vec::<IndexedTransactionInfo>::decode(&mut &raw[..]).map_err(|e| {
+			ConsensusError::Other(format!("indexed_transactions: decode result: {e}").into())
+		})
+	}
+
+	/// Execute via runtime API once, query indexed metadata on the same `ApiRef`, and obtain
+	/// `StorageChanges` (Case B). Caller must reassign `params.state_action` before forwarding.
 	fn execute_block(
 		&self,
 		params: &BlockImportParams<Block>,
-	) -> Result<StorageChanges<HashingFor<Block>>, ConsensusError> {
+	) -> Result<(StorageChanges<HashingFor<Block>>, Vec<IndexedTransactionInfo>), ConsensusError> {
 		let parent_hash = *params.header.parent_hash();
 		let body = params.body.clone().unwrap_or_default();
 		let block = Block::new(params.header.clone(), body);
@@ -312,6 +363,18 @@ where
 		runtime_api.execute_block(parent_hash, block.into()).map_err(|e| {
 			ConsensusError::Other(format!("execute_block: runtime_api.execute_block: {e}").into())
 		})?;
+
+		let infos = runtime_api
+			.execute_in_transaction(|api| {
+				TransactionOutcome::Rollback(
+					api.indexed_transactions(parent_hash, *params.header.number()),
+				)
+			})
+			.map_err(|e| {
+				ConsensusError::Other(
+					format!("execute_block: indexed_transactions runtime API failed: {e}").into(),
+				)
+			})?;
 
 		let state = self.client.state_at(parent_hash).map_err(|e| {
 			ConsensusError::Other(format!("execute_block: state_at({parent_hash:?}): {e}").into())
@@ -333,44 +396,54 @@ where
 			));
 		}
 
-		Ok(gen_storage_changes)
+		Ok((gen_storage_changes, infos))
 	}
 }
 
-/// Renew hashes tagged by their discovery path.
-///
-/// `Verified` pairs include the hashing algorithm (sourced from the runtime API); bitswap
-/// can verify integrity. `Unverified` are bare hashes from host calls; each blob is verified
-/// at fetch time by hashing with every supported [`HashingAlgorithm`].
-enum RenewHashes {
-	Verified(HashSet<(ContentHash, HashingAlgorithm)>),
-	Unverified(HashSet<ContentHash>),
-}
-
-impl RenewHashes {
-	fn is_empty(&self) -> bool {
-		match self {
-			Self::Verified(s) => s.is_empty(),
-			Self::Unverified(s) => s.is_empty(),
+/// Returns runtime-verified renew pairs for host-call renew operations.
+fn verified_renews_from_index_ops(
+	ops: &[IndexOperation],
+	infos: &[IndexedTransactionInfo],
+	context: &'static str,
+) -> Result<HashSet<(ContentHash, HashingAlgorithm)>, ConsensusError> {
+	let mut renews = HashSet::new();
+	for op in ops {
+		let IndexOperation::Renew { hash, .. } = op else { continue };
+		let hash: ContentHash = hash.as_slice().try_into().map_err(|_| {
+			ConsensusError::Other(format!("{context}: malformed renew content hash").into())
+		})?;
+		let info = infos.iter().find(|info| info.content_hash == hash).ok_or_else(|| {
+			ConsensusError::Other(
+				format!("{context}: runtime API missing metadata for renew hash {hash:?}").into(),
+			)
+		})?;
+		if info.cid_codec == RAW_CODEC {
+			renews.insert((hash, info.hashing));
 		}
 	}
+	Ok(renews)
+}
+
+fn overlay_from_storage_changes<Block: BlockT>(
+	changes: &StorageChanges<HashingFor<Block>>,
+) -> OverlayedChanges<HashingFor<Block>> {
+	let mut overlay = OverlayedChanges::default();
+	for (key, value) in &changes.main_storage_changes {
+		overlay.set_storage(key.clone(), value.clone());
+	}
+	for (storage_key, changes) in &changes.child_storage_changes {
+		let child_info = ChildInfo::new_default(storage_key);
+		for (key, value) in changes {
+			overlay.set_child_storage(&child_info, key.clone(), value.clone());
+		}
+	}
+	overlay
 }
 
 /// Result of [`StorageChainBlockImport::fetch_all`]: the fetched payload bytes.
 #[derive(Default)]
 struct FetchedRenews {
 	payload: Vec<(ContentHash, Vec<u8>)>,
-}
-
-/// Pull `Renew` content-hashes from a host-call index-ops log. `Insert` ops are ignored:
-/// their bytes are in the block body.
-fn extract_renews_from_index_ops(ops: &[IndexOperation]) -> HashSet<ContentHash> {
-	ops.iter()
-		.filter_map(|op| match op {
-			IndexOperation::Renew { hash, .. } => hash.as_slice().try_into().ok(),
-			IndexOperation::Insert { .. } => None,
-		})
-		.collect()
 }
 
 #[cfg(test)]
@@ -560,43 +633,23 @@ mod tests {
 	}
 
 	#[test]
-	fn extract_renews_from_index_ops_returns_only_renew_hashes() {
-		let ops = vec![
-			IndexOperation::Insert { extrinsic: 0, hash: vec![0xaa; 32], size: 100 },
-			IndexOperation::Renew { extrinsic: 1, hash: vec![0xbb; 32] },
-			IndexOperation::Insert { extrinsic: 2, hash: vec![0xcc; 32], size: 200 },
-			IndexOperation::Renew { extrinsic: 3, hash: vec![0xdd; 32] },
-		];
-		let renews = extract_renews_from_index_ops(&ops);
-		assert_eq!(renews, HashSet::from([[0xbb; 32], [0xdd; 32]]));
+	fn verified_renews_from_index_ops_uses_metadata_hashing_with_unknown_extrinsic_index() {
+		let hash = [7; 32];
+		let ops = vec![IndexOperation::Renew { extrinsic: 0, hash: hash.to_vec() }];
+		let infos = vec![info(hash, 32, HashingAlgorithm::Keccak256, RAW_CODEC, u32::MAX)];
+
+		let renews = verified_renews_from_index_ops(&ops, &infos, "test").unwrap();
+
+		assert_eq!(renews, HashSet::from([(hash, HashingAlgorithm::Keccak256)]));
 	}
 
 	#[test]
-	fn extract_renews_from_index_ops_dedupes_duplicate_hashes() {
-		let h = [0x42; 32];
-		let ops = vec![
-			IndexOperation::Renew { extrinsic: 0, hash: h.to_vec() },
-			IndexOperation::Renew { extrinsic: 1, hash: h.to_vec() },
-			IndexOperation::Renew { extrinsic: 2, hash: h.to_vec() },
-		];
-		let renews = extract_renews_from_index_ops(&ops);
-		assert_eq!(renews, HashSet::from([h]));
-	}
+	fn indexed_transactions_after_execute_block_requires_runtime_metadata_for_renew() {
+		let hash = [9; 32];
+		let ops = vec![IndexOperation::Renew { extrinsic: 0, hash: hash.to_vec() }];
+		let err = verified_renews_from_index_ops(&ops, &[], "case B").unwrap_err();
+		let msg = format!("{err}");
 
-	#[test]
-	fn extract_renews_from_index_ops_handles_empty_input() {
-		let renews = extract_renews_from_index_ops(&[]);
-		assert!(renews.is_empty());
-	}
-
-	#[test]
-	fn extract_renews_from_index_ops_drops_malformed_hash_length() {
-		let ops = vec![
-			IndexOperation::Renew { extrinsic: 0, hash: vec![0xee; 31] },
-			IndexOperation::Renew { extrinsic: 1, hash: vec![0xff; 32] },
-			IndexOperation::Renew { extrinsic: 2, hash: vec![0x11; 33] },
-		];
-		let renews = extract_renews_from_index_ops(&ops);
-		assert_eq!(renews, HashSet::from([[0xff; 32]]));
+		assert!(msg.contains("case B: runtime API missing metadata"), "unexpected: {msg}");
 	}
 }
