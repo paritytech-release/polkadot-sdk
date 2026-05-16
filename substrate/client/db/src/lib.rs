@@ -65,7 +65,7 @@ use sc_client_api::{
 	blockchain::{BlockGap, BlockGapType},
 	leaves::{FinalizationOutcome, LeafSet},
 	utils::is_descendent_of,
-	IoInfo, MemoryInfo, MemorySize, TrieCacheContext, UsageInfo,
+	IoInfo, MemoryInfo, MemorySize, PrefetchedIndexedTransactions, TrieCacheContext, UsageInfo,
 };
 use sc_state_db::{IsPruned, LastCanonicalized, StateDb};
 use sp_arithmetic::traits::Saturating;
@@ -911,6 +911,7 @@ pub struct BlockImportOperation<Block: BlockT> {
 	create_gap: bool,
 	reset_storage: bool,
 	index_ops: Vec<IndexOperation>,
+	synthetic_index_ops: Vec<IndexOperation>,
 	prefetched_indexed_transactions: HashMap<DbHash, Vec<u8>>,
 }
 
@@ -1077,9 +1078,10 @@ impl<Block: BlockT> sc_client_api::backend::BlockImportOperation<Block>
 
 	fn set_prefetched_indexed_transactions(
 		&mut self,
-		data: Vec<([u8; 32], Vec<u8>)>,
+		data: PrefetchedIndexedTransactions,
 	) -> ClientResult<()> {
-		for (hash, bytes) in data {
+		self.synthetic_index_ops = data.ops;
+		for (hash, bytes) in data.renew_payloads {
 			self.prefetched_indexed_transactions.insert(DbHash::from_slice(&hash), bytes);
 		}
 		Ok(())
@@ -1700,15 +1702,22 @@ impl<Block: BlockT> Backend<Block> {
 
 			transaction.set_from_vec(columns::HEADER, &lookup_key, pending_block.header.encode());
 			if let Some(body) = pending_block.body {
-				// If we have any index operations we save block in the new format with indexed
-				// extrinsic headers Otherwise we save the body as a single blob.
-				if operation.index_ops.is_empty() {
+				// Effective index ops: runtime-produced ops always win when present (full-sync,
+				// re-execute path). Synthetic ops supplied via
+				// `PrefetchedIndexedTransactions.ops` are a strict fallback used only when the
+				// runtime did not execute the block (gap-sync backfill, dead-code-gated today).
+				let effective_ops = if !operation.index_ops.is_empty() {
+					operation.index_ops
+				} else {
+					operation.synthetic_index_ops
+				};
+				if effective_ops.is_empty() {
 					transaction.set_from_vec(columns::BODY, &lookup_key, body.encode());
 				} else {
 					let body = apply_index_ops::<Block>(
 						&mut transaction,
 						body,
-						operation.index_ops,
+						effective_ops,
 						operation.prefetched_indexed_transactions,
 					);
 					transaction.set_from_vec(columns::BODY_INDEX, &lookup_key, body);
@@ -2417,6 +2426,7 @@ impl<Block: BlockT> sc_client_api::backend::Backend<Block> for Backend<Block> {
 			create_gap: true,
 			reset_storage: false,
 			index_ops: Default::default(),
+			synthetic_index_ops: Default::default(),
 			prefetched_indexed_transactions: HashMap::new(),
 		})
 	}
@@ -3008,8 +3018,59 @@ pub(crate) mod tests {
 			op.update_transaction_index(index).unwrap();
 		}
 		if !prefetched.is_empty() {
-			op.set_prefetched_indexed_transactions(prefetched).unwrap();
+			op.set_prefetched_indexed_transactions(PrefetchedIndexedTransactions {
+				ops: Vec::new(),
+				renew_payloads: prefetched,
+			})
+			.unwrap();
 		}
+
+		let (root, overlay) = op.old_state.storage_root(
+			vec![(block_hash.as_ref(), Some(block_hash.as_ref()))].into_iter(),
+			StateVersion::V1,
+		);
+		op.update_db_storage(overlay).unwrap();
+		header.state_root = root.into();
+
+		op.set_block_data(header.clone(), Some(body), None, None, NewBlockState::Best, true)
+			.unwrap();
+
+		backend.commit_operation(op)?;
+
+		Ok(header.hash())
+	}
+
+	/// Inserts a block while routing both runtime-produced and synthetic index ops through the
+	/// new `PrefetchedIndexedTransactions` carrier. Exercises the precedence rule in
+	/// `try_commit_operation` where `synthetic_index_ops` is consulted only when
+	/// `runtime_index_ops` is `None`/empty.
+	pub fn insert_block_with_synthetic_ops(
+		backend: &Backend<Block>,
+		number: u64,
+		parent_hash: H256,
+		extrinsics_root: H256,
+		body: Vec<UncheckedXt>,
+		runtime_index_ops: Option<Vec<IndexOperation>>,
+		synthetic_index_ops: Vec<IndexOperation>,
+		renew_payloads: Vec<([u8; 32], Vec<u8>)>,
+	) -> Result<H256, sp_blockchain::Error> {
+		use sp_runtime::testing::Digest;
+
+		let digest = Digest::default();
+		let mut header =
+			Header { number, parent_hash, state_root: Default::default(), digest, extrinsics_root };
+
+		let block_hash = if number == 0 { Default::default() } else { parent_hash };
+		let mut op = backend.begin_operation().unwrap();
+		backend.begin_state_operation(&mut op, block_hash).unwrap();
+		if let Some(index) = runtime_index_ops {
+			op.update_transaction_index(index).unwrap();
+		}
+		op.set_prefetched_indexed_transactions(PrefetchedIndexedTransactions {
+			ops: synthetic_index_ops,
+			renew_payloads,
+		})
+		.unwrap();
 
 		let (root, overlay) = op.old_state.storage_root(
 			vec![(block_hash.as_ref(), Some(block_hash.as_ref()))].into_iter(),
@@ -7418,6 +7479,324 @@ pub(crate) mod tests {
 		fn sequential_renew_blocks_all_prefetched_eventually_pruned(#[case] kind: BackendKind) {
 			let mut factory = BackendFactory::new(kind, BlocksPruning::Some(2));
 			check_sequential_renew_blocks_all_prefetched_eventually_pruned(&mut factory);
+		}
+
+		// Synthetic-ops precedence tests for the new `PrefetchedIndexedTransactions.ops` path.
+		// kvdb-memdb only — the precedence rule is backend-agnostic and the per-backend matrix
+		// above already validates the underlying refcounting on each backend.
+
+		#[test]
+		fn synthetic_ops_take_effect_when_runtime_index_ops_empty() {
+			let factory = BackendFactory::new(BackendKind::KvdbMemdb, BlocksPruning::KeepAll);
+			let payload_xt = UncheckedXt::new_transaction(7.into(), ()).encode();
+			let payload = payload_xt[1..].to_vec();
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			insert_block_with_synthetic_ops(
+				factory.backend(),
+				0,
+				Default::default(),
+				Default::default(),
+				vec![UncheckedXt::new_transaction(7.into(), ())],
+				None,
+				vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+					size: payload.len() as u32,
+				}],
+				Vec::new(),
+			)
+			.unwrap();
+
+			assert_eq!(
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.as_deref(),
+				Some(payload.as_slice()),
+				"synthetic Insert must populate TRANSACTION when no runtime ops",
+			);
+		}
+
+		#[test]
+		fn runtime_index_ops_win_over_synthetic() {
+			let factory = BackendFactory::new(BackendKind::KvdbMemdb, BlocksPruning::KeepAll);
+			let payload_xt = UncheckedXt::new_transaction(11.into(), ()).encode();
+			let payload = payload_xt[1..].to_vec();
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			let bogus_hash_arr = [0xAAu8; 32];
+
+			insert_block_with_synthetic_ops(
+				factory.backend(),
+				0,
+				Default::default(),
+				Default::default(),
+				vec![UncheckedXt::new_transaction(11.into(), ())],
+				Some(vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+					size: payload.len() as u32,
+				}]),
+				vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: bogus_hash_arr.to_vec(),
+					size: payload.len() as u32,
+				}],
+				Vec::new(),
+			)
+			.unwrap();
+
+			assert_eq!(
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.as_deref(),
+				Some(payload.as_slice()),
+				"runtime-produced index_ops must win over synthetic",
+			);
+			assert!(
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(bogus_hash_arr.into())
+					.unwrap()
+					.is_none(),
+				"synthetic Insert must be silently dropped when runtime ops present",
+			);
+		}
+
+		#[test]
+		fn empty_both_falls_back_to_plain_body() {
+			let factory = BackendFactory::new(BackendKind::KvdbMemdb, BlocksPruning::KeepAll);
+			let body = vec![UncheckedXt::new_transaction(42.into(), ())];
+
+			let block_hash = insert_block_with_synthetic_ops(
+				factory.backend(),
+				0,
+				Default::default(),
+				Default::default(),
+				body.clone(),
+				None,
+				Vec::new(),
+				Vec::new(),
+			)
+			.unwrap();
+
+			let stored_body = factory.backend().blockchain().body(block_hash).unwrap();
+			assert_eq!(stored_body, Some(body), "body must round-trip via plain BODY column");
+		}
+
+		#[test]
+		fn synthetic_renew_uses_prefetched_payload() {
+			let factory = BackendFactory::new(BackendKind::KvdbMemdb, BlocksPruning::KeepAll);
+			let payload = b"renew-payload-from-bitswap".to_vec();
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			insert_block_with_synthetic_ops(
+				factory.backend(),
+				0,
+				Default::default(),
+				Default::default(),
+				vec![UncheckedXt::new_transaction(1.into(), ())],
+				None,
+				vec![IndexOperation::Renew { extrinsic: 0, hash: payload_hash_arr.to_vec() }],
+				vec![(payload_hash_arr, payload.clone())],
+			)
+			.unwrap();
+
+			assert_eq!(
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.as_deref(),
+				Some(payload.as_slice()),
+				"synthetic Renew with payload must store bytes in TRANSACTION",
+			);
+		}
+
+		#[test]
+		fn synthetic_renew_without_prefetched_references_existing() {
+			let factory = BackendFactory::new(BackendKind::KvdbMemdb, BlocksPruning::KeepAll);
+			let payload_xt = UncheckedXt::new_transaction(5.into(), ()).encode();
+			let payload = payload_xt[1..].to_vec();
+			let payload_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&payload);
+			let payload_hash_arr: [u8; 32] = payload_hash.into();
+
+			let block0 = insert_block(
+				factory.backend(),
+				0,
+				Default::default(),
+				None,
+				Default::default(),
+				vec![UncheckedXt::new_transaction(5.into(), ())],
+				Some(vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: payload_hash_arr.to_vec(),
+					size: payload.len() as u32,
+				}]),
+			)
+			.unwrap();
+
+			insert_block_with_synthetic_ops(
+				factory.backend(),
+				1,
+				block0,
+				Default::default(),
+				vec![UncheckedXt::new_transaction(6.into(), ())],
+				None,
+				vec![IndexOperation::Renew { extrinsic: 0, hash: payload_hash_arr.to_vec() }],
+				Vec::new(),
+			)
+			.unwrap();
+
+			assert_eq!(
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(payload_hash)
+					.unwrap()
+					.as_deref(),
+				Some(payload.as_slice()),
+				"synthetic Renew without payload must reference existing TRANSACTION entry",
+			);
+		}
+
+		#[test]
+		fn synthetic_insert_extracts_tail_from_body() {
+			let factory = BackendFactory::new(BackendKind::KvdbMemdb, BlocksPruning::KeepAll);
+			let payload_xt = UncheckedXt::new_transaction(13.into(), ()).encode();
+			let tail_size = 4u32;
+			let tail_start = payload_xt.len() - tail_size as usize;
+			let expected_tail = payload_xt[tail_start..].to_vec();
+			let tail_hash = <HashingFor<Block> as sp_core::Hasher>::hash(&expected_tail);
+			let tail_hash_arr: [u8; 32] = tail_hash.into();
+
+			insert_block_with_synthetic_ops(
+				factory.backend(),
+				0,
+				Default::default(),
+				Default::default(),
+				vec![UncheckedXt::new_transaction(13.into(), ())],
+				None,
+				vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: tail_hash_arr.to_vec(),
+					size: tail_size,
+				}],
+				Vec::new(),
+			)
+			.unwrap();
+
+			assert_eq!(
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(tail_hash)
+					.unwrap()
+					.as_deref(),
+				Some(expected_tail.as_slice()),
+				"synthetic Insert must extract exactly `size` tail bytes from body[extrinsic]",
+			);
+		}
+
+		#[test]
+		fn synthetic_insert_oversized_size_falls_back_to_full_extrinsic() {
+			let factory = BackendFactory::new(BackendKind::KvdbMemdb, BlocksPruning::KeepAll);
+			let payload_xt = UncheckedXt::new_transaction(17.into(), ()).encode();
+			let bogus_hash_arr = [0xBBu8; 32];
+			let oversized = (payload_xt.len() + 1) as u32;
+
+			let block_hash = insert_block_with_synthetic_ops(
+				factory.backend(),
+				0,
+				Default::default(),
+				Default::default(),
+				vec![UncheckedXt::new_transaction(17.into(), ())],
+				None,
+				vec![IndexOperation::Insert {
+					extrinsic: 0,
+					hash: bogus_hash_arr.to_vec(),
+					size: oversized,
+				}],
+				Vec::new(),
+			)
+			.unwrap();
+
+			assert!(
+				factory
+					.backend()
+					.blockchain()
+					.indexed_transaction(bogus_hash_arr.into())
+					.unwrap()
+					.is_none(),
+				"oversized synthetic Insert must fall back to DbExtrinsic::Full, no TRANSACTION write",
+			);
+			let stored_body = factory.backend().blockchain().body(block_hash).unwrap();
+			assert_eq!(
+				stored_body,
+				Some(vec![UncheckedXt::new_transaction(17.into(), ())]),
+				"body still reconstructible despite oversized Insert",
+			);
+		}
+
+		#[test]
+		fn multiple_synthetic_ops_per_block_apply_in_order() {
+			let factory = BackendFactory::new(BackendKind::KvdbMemdb, BlocksPruning::KeepAll);
+			let xt_a = UncheckedXt::new_transaction(21.into(), ()).encode();
+			let xt_b = UncheckedXt::new_transaction(22.into(), ()).encode();
+			let payload_a = xt_a[1..].to_vec();
+			let payload_b = xt_b[1..].to_vec();
+			let hash_a = <HashingFor<Block> as sp_core::Hasher>::hash(&payload_a);
+			let hash_b = <HashingFor<Block> as sp_core::Hasher>::hash(&payload_b);
+			let hash_a_arr: [u8; 32] = hash_a.into();
+			let hash_b_arr: [u8; 32] = hash_b.into();
+
+			insert_block_with_synthetic_ops(
+				factory.backend(),
+				0,
+				Default::default(),
+				Default::default(),
+				vec![
+					UncheckedXt::new_transaction(21.into(), ()),
+					UncheckedXt::new_transaction(22.into(), ()),
+				],
+				None,
+				vec![
+					IndexOperation::Insert {
+						extrinsic: 0,
+						hash: hash_a_arr.to_vec(),
+						size: payload_a.len() as u32,
+					},
+					IndexOperation::Insert {
+						extrinsic: 1,
+						hash: hash_b_arr.to_vec(),
+						size: payload_b.len() as u32,
+					},
+				],
+				Vec::new(),
+			)
+			.unwrap();
+
+			assert_eq!(
+				factory.backend().blockchain().indexed_transaction(hash_a).unwrap().as_deref(),
+				Some(payload_a.as_slice()),
+				"first synthetic Insert applied",
+			);
+			assert_eq!(
+				factory.backend().blockchain().indexed_transaction(hash_b).unwrap().as_deref(),
+				Some(payload_b.as_slice()),
+				"second synthetic Insert applied",
+			);
 		}
 	}
 }

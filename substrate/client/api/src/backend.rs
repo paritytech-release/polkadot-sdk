@@ -162,6 +162,28 @@ impl NewBlockState {
 	}
 }
 
+/// Out-of-band indexed-transaction data attached by upstream block-import wrappers
+/// (e.g. cumulus storage-chain-sync). Consumed by the backend to populate the
+/// `TRANSACTION` column either:
+///
+/// 1. as renewal payload lookup when the runtime produced `IndexOperation`s via
+///    block execution, or
+/// 2. as the *sole* source of synthetic `IndexOperation`s when block execution
+///    is skipped (gap-sync backfill).
+#[derive(Default, Debug, Clone)]
+pub struct PrefetchedIndexedTransactions {
+	/// Synthetic `IndexOperation`s. Used by the backend only when the runtime
+	/// did NOT call `update_transaction_index` (i.e. `operation.index_ops` is
+	/// empty). When the runtime produced index ops via execution, these are
+	/// silently ignored.
+	pub ops: Vec<IndexOperation>,
+
+	/// Renewal payloads keyed by content hash. Consumed inside `apply_index_ops`
+	/// when processing `IndexOperation::Renew` for a hash the local backend
+	/// doesn't yet hold.
+	pub renew_payloads: Vec<([u8; 32], Vec<u8>)>,
+}
+
 /// Block insertion operation.
 ///
 /// Keeps hold if the inserted block state and data.
@@ -258,7 +280,7 @@ pub trait BlockImportOperation<Block: BlockT> {
 	/// Forward `prefetched_indexed_transactions` from the block import params to the backend.
 	fn set_prefetched_indexed_transactions(
 		&mut self,
-		_data: Vec<([u8; 32], Vec<u8>)>,
+		_data: PrefetchedIndexedTransactions,
 	) -> sp_blockchain::Result<()> {
 		Ok(())
 	}
