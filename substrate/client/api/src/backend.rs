@@ -162,6 +162,30 @@ impl NewBlockState {
 	}
 }
 
+/// Out-of-band indexed-transaction data attached by upstream block-import wrappers
+/// (e.g. cumulus storage-chain-sync). Consumed by the backend to populate the
+/// `TRANSACTION` column either:
+///
+/// 1. as renewal payload lookup when the runtime produced `IndexOperation`s via
+///    block execution, or
+/// 2. as the *sole* source of synthetic `IndexOperation`s when block execution
+///    is skipped (gap-sync backfill).
+#[derive(Default, Debug, Clone)]
+pub struct PrefetchedIndexedTransactions {
+	/// Synthetic `IndexOperation`s used by the backend in lieu of runtime execution.
+	///
+	/// Implementations route these into the same slot as `update_transaction_index`,
+	/// which `apply_block` invokes *after* `set_prefetched_indexed_transactions` when
+	/// the runtime executed the block. That call order means runtime-produced ops
+	/// naturally override wrapper-supplied ops — the rule is "runtime wins".
+	pub ops: Vec<IndexOperation>,
+
+	/// Renewal payloads keyed by content hash. Consumed inside `apply_index_ops`
+	/// when processing `IndexOperation::Renew` for a hash the local backend
+	/// doesn't yet hold.
+	pub renew_payloads: Vec<([u8; 32], Vec<u8>)>,
+}
+
 /// Block insertion operation.
 ///
 /// Keeps hold if the inserted block state and data.
@@ -256,9 +280,17 @@ pub trait BlockImportOperation<Block: BlockT> {
 		-> sp_blockchain::Result<()>;
 
 	/// Forward `prefetched_indexed_transactions` from the block import params to the backend.
+	///
+	/// Implementations consume `data.ops` as transaction-index operations and `data.renew_payloads`
+	/// as a content-hash → bytes lookup for `IndexOperation::Renew` entries.
+	///
+	/// Call-order contract: `apply_block` in `sc-service` always invokes this method before any
+	/// `update_transaction_index` call for the same operation. If both write to the same internal
+	/// slot, the later call wins, so runtime-produced ops naturally override wrapper-supplied ops
+	/// when both are present.
 	fn set_prefetched_indexed_transactions(
 		&mut self,
-		_data: Vec<([u8; 32], Vec<u8>)>,
+		_data: PrefetchedIndexedTransactions,
 	) -> sp_blockchain::Result<()> {
 		Ok(())
 	}
