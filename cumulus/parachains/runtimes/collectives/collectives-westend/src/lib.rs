@@ -859,6 +859,7 @@ type Migrations = (
 		Runtime,
 		pallet_session::migrations::v1::InitOffenceSeverity<Runtime>,
 	>,
+	cumulus_pallet_parachain_system::migration::Migration<Runtime>,
 	// #11705: drain residual relay-treasury XCM payouts into accumulation account.
 	// Idempotent. No further activity on the legacy `py/trsry` account is expected.
 	// Safe to remove once confirmed.
