@@ -1727,6 +1727,7 @@ name = "asset-hub-westend-runtime"
 version = "0.15.0"
 dependencies = [
  "alloy-core",
+ "approx",
  "asset-test-utils",
  "assets-common",
  "bp-asset-hub-rococo",
@@ -8072,6 +8073,7 @@ dependencies = [
  "frame-system",
  "num-format",
  "pallet-staking",
+ "pallet-staking-async",
  "sp-staking",
 ]
 
@@ -12598,7 +12600,7 @@ dependencies = [
  "frame-system",
  "log",
  "pallet-bags-list",
- "pallet-staking",
+ "pallet-staking-async",
  "sp-core 28.0.0",
  "sp-runtime 31.0.1",
 ]
@@ -18413,9 +18415,9 @@ dependencies = [
 name = "polkadot-voter-bags"
 version = "7.0.0"
 dependencies = [
+ "asset-hub-westend-runtime",
  "clap",
  "generate-bags",
- "westend-runtime",
 ]
 
 [[package]]
@@ -19815,15 +19817,15 @@ dependencies = [
 name = "remote-ext-tests-bags-list"
 version = "1.0.0"
 dependencies = [
+ "asset-hub-westend-runtime",
  "clap",
  "frame-system",
  "log",
  "pallet-bags-list-remote-tests",
  "sp-core 28.0.0",
  "sp-tracing 16.0.0",
+ "testnet-parachains-constants",
  "tokio",
- "westend-runtime",
- "westend-runtime-constants",
 ]
 
 [[package]]
@@ -30138,11 +30140,9 @@ dependencies = [
 name = "westend-runtime"
 version = "7.0.0"
 dependencies = [
- "approx",
  "binary-merkle-tree 13.0.0",
  "bitvec",
  "frame-benchmarking",
- "frame-election-provider-support",
  "frame-executive",
  "frame-metadata-hash-extension",
  "frame-remote-externalities",
@@ -30158,14 +30158,9 @@ dependencies = [
  "pallet-authority-discovery",
  "pallet-authorship",
  "pallet-babe",
- "pallet-bags-list",
  "pallet-balances",
  "pallet-beefy",
  "pallet-beefy-mmr",
- "pallet-delegated-staking",
- "pallet-election-provider-multi-phase",
- "pallet-election-provider-support-benchmarking",
- "pallet-fast-unstake",
  "pallet-grandpa",
  "pallet-identity",
  "pallet-indices",
@@ -30173,10 +30168,7 @@ dependencies = [
  "pallet-migrations",
  "pallet-mmr",
  "pallet-multisig",
- "pallet-nomination-pools",
- "pallet-nomination-pools-runtime-api",
  "pallet-offences",
- "pallet-offences-benchmarking",
  "pallet-parameters",
  "pallet-preimage",
  "pallet-proxy",
@@ -30184,11 +30176,8 @@ dependencies = [
  "pallet-root-testing",
  "pallet-scheduler",
  "pallet-session",
- "pallet-session-benchmarking",
- "pallet-staking",
  "pallet-staking-async-ah-client",
  "pallet-staking-async-rc-client",
- "pallet-staking-runtime-api",
  "pallet-sudo",
  "pallet-timestamp",
  "pallet-transaction-payment",
@@ -30221,7 +30210,6 @@ dependencies = [
  "sp-io 30.0.0",
  "sp-keyring",
  "sp-mmr-primitives",
- "sp-npos-elections",
  "sp-offchain",
  "sp-runtime 31.0.1",
  "sp-session",

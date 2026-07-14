@@ -410,6 +410,7 @@ try-runtime = [
 	"frame-support?/try-runtime",
 	"frame-system?/try-runtime",
 	"frame-try-runtime/try-runtime",
+	"generate-bags?/try-runtime",
 	"pallet-accumulate-and-forward?/try-runtime",
 	"pallet-alliance?/try-runtime",
 	"pallet-asset-conversion-ops?/try-runtime",
